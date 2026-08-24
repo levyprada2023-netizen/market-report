@@ -1,0 +1,27 @@
+yaml
+name: market report
+
+on:
+  schedule:
+    # Six triggers cover both US daylight and standard time.
+    # The script sends only when a report is actually due.
+    - cron: '0 14 * * 1-5'    # 10:00 ET summer
+    - cron: '30 16 * * 1-5'   # 12:30 ET summer
+    - cron: '0 19 * * 1-5'    # 15:00 ET summer
+    - cron: '0 15 * * 1-5'    # 10:00 ET winter
+    - cron: '30 17 * * 1-5'   # 12:30 ET winter
+    - cron: '0 20 * * 1-5'    # 15:00 ET winter
+  workflow_dispatch:          # lets you run it by hand from the Actions tab
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install yfinance mplfinance feedparser pandas matplotlib requests
+      - run: python market_report.py
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
