@@ -562,6 +562,193 @@ def get_calendar():
     ahead.sort(key=lambda x: x["when"])
     return todays, ahead
 
+SP500_LIST = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+CAPE_URL = "https://www.multpl.com/shiller-pe"
+SP500_PE_URL = "https://www.multpl.com/s-p-500-pe-ratio"
+
+# Breadth proxies. RSP is the equal weight S&P, so RSP against SPY says
+# whether the average stock is keeping up with the megacaps.
+HEALTH_TICKERS = {
+    "RSP": "S&P 500 equal weight",
+    "SPY": "S&P 500 cap weight",
+    "^SKEW": "CBOE SKEW, tail risk pricing",
+    "HYG": "High yield credit",
+    "^VIX": "VIX",
+}
+
+
+def sp500_members():
+    """Current S&P 500 constituents, read from the public listing."""
+    try:
+        r = requests.get(SP500_LIST, timeout=30, headers={"User-Agent": UA})
+        r.raise_for_status()
+        seg = r.text[r.text.find('id="constituents"'):]
+        seg = seg[:seg.find("</table>")]
+        out = []
+        for row in re.split(r"<tr[^>]*>", seg)[2:]:
+            cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+            if not cells:
+                continue
+            txt = re.sub(r"<[^>]+>", "", cells[0]).strip()
+            if re.fullmatch(r"[A-Z][A-Z.\-]{0,6}", txt):
+                out.append(txt.replace(".", "-"))
+        return list(dict.fromkeys(out))
+    except Exception as e:
+        print(f"S&P 500 list failed, falling back to universe: {e}",
+              file=sys.stderr)
+        return list(UNIVERSE)
+
+
+def scrape_multpl(url):
+    """multpl publishes the current value in a div marked current."""
+    try:
+        r = requests.get(url, timeout=25, headers={"User-Agent": UA})
+        m = re.search(r'id="current"[^>]*>(.*?)</div>', r.text, re.S)
+        if not m:
+            return None
+        txt = re.sub(r"<[^>]+>", " ", m.group(1))
+        num = re.search(r"([\d]+\.[\d]+)", txt)
+        return float(num.group(1)) if num else None
+    except Exception as e:
+        print(f"multpl scrape failed {url}: {e}", file=sys.stderr)
+        return None
+
+
+STOCKTWITS = "https://api.stocktwits.com/api/2/streams/symbol/{sym}.json"
+APEWISDOM = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
+
+
+def retail_sentiment(symbols, min_tagged=4):
+    """Bull versus bear tagging on StockTwits, per symbol.
+
+    Posters tag their own messages, so this measures the mood of people
+    posting about a ticker today. It is a crowd positioning read, not a
+    forecast, and small samples mean very little.
+    """
+    out = {}
+    for sym in symbols:
+        if "." in sym or "-" in sym:          # non US listings are not covered
+            continue
+        try:
+            r = requests.get(STOCKTWITS.format(sym=sym), timeout=15,
+                             headers={"User-Agent": UA})
+            if r.status_code != 200:
+                continue
+            msgs = r.json().get("messages", [])
+            bull = bear = 0
+            for m in msgs:
+                basic = ((m.get("entities") or {}).get("sentiment") or {}).get("basic")
+                if basic == "Bullish":
+                    bull += 1
+                elif basic == "Bearish":
+                    bear += 1
+            tagged = bull + bear
+            if tagged < min_tagged:
+                continue
+            out[sym] = {
+                "bull": bull, "bear": bear, "tagged": tagged,
+                "posts": len(msgs),
+                "bull_pct": bull / tagged * 100,
+            }
+        except Exception as e:
+            print(f"stocktwits failed {sym}: {e}", file=sys.stderr)
+    # StockTwits posters skew bullish on almost everything, so a raw 90%
+    # reading says little. What is informative is how a name sits against the
+    # crowd's own baseline on the same day.
+    if out:
+        vals = sorted(v["bull_pct"] for v in out.values())
+        mid = vals[len(vals) // 2]
+        for v in out.values():
+            v["vs_crowd"] = v["bull_pct"] - mid
+        for v in out.values():
+            v["baseline"] = mid
+    return out
+
+
+def reddit_buzz(limit=15):
+    """What retail is talking about, and what is suddenly being talked about.
+
+    The change against 24 hours ago matters more than the raw count, since
+    the same megacaps sit at the top of the list every single day.
+    """
+    try:
+        r = requests.get(APEWISDOM, timeout=20, headers={"User-Agent": UA})
+        r.raise_for_status()
+        rows = []
+        for x in r.json().get("results", [])[:60]:
+            now = int(x.get("mentions") or 0)
+            prior = int(x.get("mentions_24h_ago") or 0)
+            rows.append({
+                "ticker": x.get("ticker", ""),
+                "name": x.get("name", ""),
+                "mentions": now,
+                "prior": prior,
+                "change": ((now / prior - 1) * 100) if prior else None,
+                "upvotes": int(x.get("upvotes") or 0),
+            })
+        return rows[:limit]
+    except Exception as e:
+        print(f"reddit buzz failed: {e}", file=sys.stderr)
+        return []
+
+
+def market_health():
+    """Breadth and valuation for the market as a whole, not single names."""
+    out = {}
+
+    members = sp500_members()
+    out["members"] = len(members)
+    try:
+        df = yf.download(members, period="1y", interval="1d", progress=False,
+                         auto_adjust=False, threads=True)
+        c = df["Close"].dropna(axis=1, how="all")
+        last, prev = c.iloc[-1], c.iloc[-2]
+
+        adv = int((last > prev).sum())
+        dec = int((last < prev).sum())
+        unch = int(c.shape[1] - adv - dec)
+        sma50 = c.rolling(50, min_periods=40).mean().iloc[-1]
+        sma200 = c.rolling(200, min_periods=150).mean().iloc[-1]
+        hi52 = c.rolling(252, min_periods=200).max().iloc[-1]
+        lo52 = c.rolling(252, min_periods=200).min().iloc[-1]
+        n = c.shape[1]
+
+        out.update({
+            "counted": n,
+            "advancers": adv,
+            "decliners": dec,
+            "unchanged": unch,
+            "ad_ratio": (adv / dec) if dec else None,
+            "above50": float((last > sma50).sum()) / n * 100,
+            "above200": float((last > sma200).sum()) / n * 100,
+            "new_highs": int((last >= hi52 * 0.999).sum()),
+            "new_lows": int((last <= lo52 * 1.001).sum()),
+            "median_move": float(((last / prev - 1) * 100).median()),
+        })
+    except Exception as e:
+        print(f"breadth failed: {e}", file=sys.stderr)
+
+    try:
+        h = yf.download(list(HEALTH_TICKERS), period="6mo", interval="1d",
+                        progress=False, auto_adjust=False, threads=True)["Close"]
+        def move(sym, days):
+            ser = h[sym].dropna()
+            return (float(ser.iloc[-1]) / float(ser.iloc[-1 - days]) - 1) * 100
+        out["rsp_spy_day"] = move("RSP", 1) - move("SPY", 1)
+        out["rsp_spy_month"] = move("RSP", 21) - move("SPY", 21)
+        out["rsp_spy_qtr"] = move("RSP", 63) - move("SPY", 63)
+        for sym in ("^SKEW", "HYG", "^VIX"):
+            ser = h[sym].dropna()
+            out[sym] = float(ser.iloc[-1])
+            out[sym + "_chg"] = (float(ser.iloc[-1]) / float(ser.iloc[-2]) - 1) * 100
+    except Exception as e:
+        print(f"health tickers failed: {e}", file=sys.stderr)
+
+    out["cape"] = scrape_multpl(CAPE_URL)
+    out["pe"] = scrape_multpl(SP500_PE_URL)
+    return out
+
+
 def scan_universe():
     """One batched download, used for both the movers list and the MA scan."""
     tickers = sorted(set(UNIVERSE) | set(WATCHLIST) | set(HOLDINGS))
@@ -923,7 +1110,8 @@ def index_technicals(symbol="^GSPC"):
 def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     news, port, analysts, earnings, prev_state, tech=None,
                     my_news=None, fundamentals=None, earn_hist=None,
-                    shorted=None, intraday=None):
+                    shorted=None, intraday=None, health=None,
+                    sentiment=None, buzz=None):
     """Compact text block handed to the model."""
     def line(names):
         return "; ".join(
@@ -971,6 +1159,53 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     f"{i['today_volume'] / i['prior_volume'] * 100:.0f}% of the "
                     "prior session's total")
         parts.append("\n".join(block))
+    if health and health.get("counted"):
+        h = health
+        parts.append(
+            "MARKET HEALTH, measured across all "
+            f"{h['counted']} S&P 500 members rather than the index alone:\n"
+            f"Advancers {h['advancers']} vs decliners {h['decliners']}"
+            + (f" (ratio {h['ad_ratio']:.2f})" if h.get("ad_ratio") else "")
+            + f"; median stock {h['median_move']:+.2f}%; "
+            f"{h['above50']:.0f}% above their 50 day average; "
+            f"{h['above200']:.0f}% above their 200 day; "
+            f"{h['new_highs']} new 52 week highs vs {h['new_lows']} new lows.\n"
+            + (f"Equal weight vs cap weight (RSP minus SPY): today "
+               f"{h['rsp_spy_day']:+.2f}%, past month {h['rsp_spy_month']:+.2f}%, "
+               f"past quarter {h['rsp_spy_qtr']:+.2f}%. Negative means the "
+               "average stock is lagging the megacaps.\n"
+               if h.get("rsp_spy_month") is not None else "")
+            + (f"Valuation: Shiller CAPE {h['cape']:.1f}"
+               if h.get("cape") else "")
+            + (f", S&P 500 trailing P/E {h['pe']:.1f}" if h.get("pe") else "")
+            + (f".\nRisk pricing: CBOE SKEW {h['^SKEW']:.1f} "
+               f"({h['^SKEW_chg']:+.1f}%), VIX {h['^VIX']:.2f} "
+               f"({h['^VIX_chg']:+.1f}%), HYG high yield credit "
+               f"{h['HYG_chg']:+.2f}%." if h.get("^SKEW") else ""))
+    if sentiment:
+        base = next(iter(sentiment.values()))["baseline"]
+        ranked = sorted(sentiment.items(), key=lambda kv: -kv[1]["vs_crowd"])
+        parts.append(
+            "RETAIL POSITIONING from StockTwits self tagged posts. Posters skew "
+            f"bullish on nearly everything, so today's median across his names "
+            f"is {base:.0f}% bullish. Judge each name by its distance from that "
+            "baseline, not the raw figure, and ignore small samples. Most "
+            "bullish: " + "; ".join(
+                f"{k} {v['bull_pct']:.0f}% ({v['vs_crowd']:+.0f} vs baseline, "
+                f"{v['tagged']} tagged)" for k, v in ranked[:6])
+            + ". Least bullish: " + "; ".join(
+                f"{k} {v['bull_pct']:.0f}% ({v['vs_crowd']:+.0f}, {v['tagged']} "
+                "tagged)" for k, v in ranked[-6:]))
+    if buzz:
+        spikes = [x for x in buzz if x["change"] and x["change"] > 80]
+        parts.append("REDDIT ATTENTION, mentions and change since 24h ago: "
+                     + "; ".join(
+                         f"{x['ticker']} {x['mentions']}"
+                         + (f" ({x['change']:+.0f}%)" if x["change"] is not None else "")
+                         for x in buzz[:12])
+                     + (". Sudden jumps worth noting: "
+                        + ", ".join(f"{x['ticker']} {x['change']:+.0f}%"
+                                    for x in spikes) if spikes else ""))
     if fng:
         parts.append(f"CNN Fear and Greed: {fng['score']:.0f} ({fng['rating']}), "
                      f"week ago {fng['week']:.0f}, month ago {fng['month']:.0f}")
@@ -1551,6 +1786,150 @@ def simple_table(names, quotes, head="Market", sort=False):
             f"<th class='num'>{session_label().title()}</th></tr>{rows}</table>")
 
 
+def retail_block(sentiment, buzz):
+    """What retail is saying, kept clearly separate from the hard data."""
+    if not sentiment and not buzz:
+        return ""
+
+    body = ""
+    if sentiment:
+        ranked = sorted(sentiment.items(), key=lambda kv: -kv[1]["vs_crowd"])
+        base = next(iter(sentiment.values()))["baseline"]
+        top, bottom = ranked[:6], ranked[-6:]
+
+        def rows(items):
+            return "".join(
+                f"<tr><td><b>{sym}</b>"
+                + ("<span class='small'> held</span>" if sym in HOLDINGS else "")
+                + f"</td><td class='num'>{v['bull_pct']:.0f}%</td>"
+                f"<td class='num {cls(v['vs_crowd'])}'>{v['vs_crowd']:+.0f}</td>"
+                f"<td class='num small'>{v['tagged']}</td></tr>"
+                for sym, v in items)
+
+        body += (
+            "<p class='small' style='margin:12px 0 2px;color:#e6edf3;"
+            "font-weight:600'>Most bullish against the crowd baseline</p>"
+            "<table><tr><th>Ticker</th><th class='num'>Bullish</th>"
+            "<th class='num'>vs baseline</th><th class='num'>Tagged</th></tr>"
+            + rows(top) + "</table>"
+            "<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+            "font-weight:600'>Least bullish against the crowd baseline</p>"
+            "<table><tr><th>Ticker</th><th class='num'>Bullish</th>"
+            "<th class='num'>vs baseline</th><th class='num'>Tagged</th></tr>"
+            + rows(bottom) + "</table>"
+            f"<p class='small'>StockTwits posters tag their own messages and "
+            f"skew bullish on nearly everything, so the raw percentage means "
+            f"little on its own. Today's median across your names is "
+            f"{base:.0f}% bullish, and the middle column is each name's "
+            f"distance from that. Tagged is the sample size, so anything in "
+            f"single digits is noise.</p>")
+
+    if buzz:
+        held = set(HOLDINGS) | set(WATCHLIST)
+        rows = "".join(
+            f"<tr><td><b>{x['ticker']}</b>"
+            + ("<span class='small'> yours</span>" if x["ticker"] in held else "")
+            + f"</td><td class='num'>{x['mentions']:,}</td>"
+            f"<td class='num {cls(x['change'] or 0)}'>"
+            f"{format(x['change'], '+.0f') + '%' if x['change'] is not None else '-'}"
+            f"</td><td class='num small'>{x['upvotes']:,}</td></tr>"
+            for x in buzz)
+        body += ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+                 "font-weight:600'>Most discussed on Reddit</p><table>"
+                 "<tr><th>Ticker</th><th class='num'>Mentions</th>"
+                 "<th class='num'>vs 24h</th><th class='num'>Upvotes</th></tr>"
+                 + rows + "</table>"
+                 "<p class='small'>The change column matters more than the "
+                 "count, since the same megacaps top this list every day. A "
+                 "large jump means something happened.</p>")
+
+    return ("<h2 id='retail'>What retail is saying</h2>"
+            "<p class='small'>Crowd positioning, not analysis. Useful for "
+            "spotting where attention has moved, and occasionally as a "
+            "contrarian signal at extremes.</p>" + body)
+
+
+def gauge_bar(pct, good_high=True):
+    pct = max(0.0, min(100.0, float(pct)))
+    val = pct if good_high else 100 - pct
+    col = ("#3fb950" if val >= 65 else "#8b949e" if val >= 35 else "#f85149")
+    return (f"<div style='background:#21262d;border-radius:5px;height:8px;"
+            f"margin:5px 0 2px;'><div style='background:{col};width:{pct:.0f}%;"
+            f"height:8px;border-radius:5px'></div></div>")
+
+
+def health_block(h):
+    """Market wide breadth and valuation."""
+    if not h:
+        return ""
+
+    def row(label, value, note=""):
+        return (f"<tr><td>{label}</td><td class='num'>{value}</td>"
+                f"<td class='small'>{note}</td></tr>")
+
+    breadth = ""
+    if h.get("counted"):
+        ad = h.get("ad_ratio")
+        breadth = (
+            "<p class='small' style='margin:12px 0 2px;color:#e6edf3;"
+            f"font-weight:600'>Breadth, all {h['counted']} S&amp;P 500 members</p>"
+            + gauge_bar(h["above50"])
+            + f"<p class='small'>{h['above50']:.0f}% trading above their 50 day "
+              f"average, {h['above200']:.0f}% above their 200 day</p>"
+            + "<table>"
+            + row("Advancers vs decliners",
+                  f"{h['advancers']} to {h['decliners']}",
+                  f"ratio {ad:.2f}" if ad else "")
+            + row("Median stock move", f"{h['median_move']:+.2f}%",
+                  "the typical stock, not the index")
+            + row("New 52 week highs", h["new_highs"], "")
+            + row("New 52 week lows", h["new_lows"], "")
+            + row("Above 50 day average", f"{h['above50']:.0f}%", "")
+            + row("Above 200 day average", f"{h['above200']:.0f}%", "")
+            + "</table>")
+
+    lead = ""
+    if h.get("rsp_spy_month") is not None:
+        d, mo, q = h["rsp_spy_day"], h["rsp_spy_month"], h["rsp_spy_qtr"]
+        lead = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+                "font-weight:600'>Equal weight versus cap weight</p><table>"
+                + row("Today", f"<span class='{cls(d)}'>{d:+.2f}%</span>", "")
+                + row("Past month", f"<span class='{cls(mo)}'>{mo:+.2f}%</span>", "")
+                + row("Past quarter", f"<span class='{cls(q)}'>{q:+.2f}%</span>", "")
+                + "</table><p class='small'>RSP against SPY. Negative means the "
+                  "average stock is lagging the megacaps, so the index is being "
+                  "carried by a narrowing group.</p>")
+
+    val = ""
+    if h.get("cape") or h.get("pe"):
+        val = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+               "font-weight:600'>Market valuation</p><table>"
+               + (row("Shiller CAPE", f"{h['cape']:.1f}",
+                      "10 year inflation adjusted earnings")
+                  if h.get("cape") else "")
+               + (row("S&amp;P 500 P/E", f"{h['pe']:.1f}", "trailing twelve months")
+                  if h.get("pe") else "")
+               + "</table>")
+
+    risk = ""
+    if h.get("^SKEW"):
+        risk = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+                "font-weight:600'>Risk pricing</p><table>"
+                + row("CBOE SKEW", f"{h['^SKEW']:.1f}",
+                      "above 145 means the options market is paying up for "
+                      "crash protection")
+                + row("VIX", f"{h['^VIX']:.2f}",
+                      f"{h['^VIX_chg']:+.1f}% on the day")
+                + row("High yield credit (HYG)", f"{h['HYG']:.2f}",
+                      f"{h['HYG_chg']:+.2f}% on the day, credit usually cracks "
+                      "before equities")
+                + "</table>")
+
+    return ("<h2 id='health'>Market health</h2>" + breadth + lead + val + risk
+            + "<p class='small'>Put and call volume ratios are not included, "
+              "as CBOE no longer publishes them on a free endpoint.</p>")
+
+
 def fng_block(f):
     if not f:
         return ""
@@ -2025,7 +2404,8 @@ NAV = [
     ("brief", "Brief"), ("portfolio", "Portfolio"), ("charts", "Charts"),
     ("mynews", "Your news"), ("macro", "Macro"), ("news", "Top news"),
     ("movers", "Movers"),
-    ("numbers", "The numbers"), ("valuation", "Valuation"),
+    ("numbers", "The numbers"), ("health", "Market health"),
+    ("valuation", "Valuation"),
     ("shorts", "Shorts"), ("allnews", "Every headline"),
 ]
 
@@ -2061,7 +2441,7 @@ def all_news_block(news):
 def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                near_ma, brief, ai_used, port, analysts, earnings,
                my_news=None, fundamentals=None, earn_hist=None, shorted=None,
-               for_pdf=False):
+               health=None, sentiment=None, buzz=None, for_pdf=False):
     now = dt.datetime.now(LOCAL_TZ)
 
     lede = ("<div class='lede' style=\"background:#161b22;color:#e6edf3;"
@@ -2119,6 +2499,8 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
     sec_market = (idx
                   + "<h2>Sectors, best to worst</h2>"
                   + simple_table(SECTORS, quotes, "Sector", sort=True)
+                  + health_block(health or {})
+                  + retail_block(sentiment or {}, buzz or [])
                   + fng_block(fng)
                   + "<h2>Heat map</h2><img src='cid:heatmap'>"
                   + movers_block(movers) + ma_block(near_ma)
@@ -2252,6 +2634,9 @@ def main():
     cal_today, cal_ahead = get_calendar()
     fng = get_fear_greed()
 
+    health = market_health()
+    sentiment = retail_sentiment(sorted(set(list(HOLDINGS) + list(WATCHLIST))))
+    buzz = reddit_buzz()
     scan = scan_universe()
     movers = hot_stocks(scan)
     near_ma = near_moving_averages(scan)
@@ -2276,14 +2661,16 @@ def main():
     payload = summary_payload(quotes, fng, movers, near_ma, cal_today,
                               cal_ahead, news, port, analysts, earnings,
                               prev_today, tech, my_news, fundamentals,
-                              earn_hist, shorted, intraday)
+                              earn_hist, shorted, intraday, health,
+                              sentiment, buzz)
     brief, ai_used = ai_brief(payload, [chart, daily], quotes, fng, movers,
                               cal_today, port)
 
     slot = "Weekend review" if args.weekly else (slot_name() or "Market report")
     html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                       near_ma, brief, ai_used, port, analysts, earnings,
-                      my_news, fundamentals, earn_hist, shorted)
+                      my_news, fundamentals, earn_hist, shorted, health,
+                      sentiment, buzz)
 
     spx = quotes.get("SPY", {}).get("pct", 0)
     qqq = quotes.get("QQQ", {}).get("pct", 0)
@@ -2302,7 +2689,8 @@ def main():
         pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng,
                               movers, near_ma, brief, ai_used, port, analysts,
                               earnings, my_news, fundamentals, earn_hist,
-                              shorted, for_pdf=True)
+                              shorted, health, sentiment, buzz,
+                              for_pdf=True)
         pdf = build_pdf(pdf_html, {"heatmap": heat, "chart": chart,
                                    "daily": daily})
         if pdf:
@@ -2315,8 +2703,8 @@ def main():
     images = {"heatmap": heat, "chart": chart, "daily": daily}
     pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                           near_ma, brief, ai_used, port, analysts, earnings,
-                          my_news, fundamentals, earn_hist, shorted,
-                          for_pdf=True)
+                          my_news, fundamentals, earn_hist, shorted, health,
+                          sentiment, buzz, for_pdf=True)
     pdf = build_pdf(pdf_html, images)
     stamp = dt.datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     send_email(subject, html, images, pdf, f"market-report-{stamp}.pdf")
