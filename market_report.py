@@ -262,16 +262,25 @@ def get_quotes(symbols):
     if getattr(close, "ndim", 1) == 1:                # single symbol
         close, opn = close.to_frame(symbols[0]), opn.to_frame(symbols[0])
 
+    # fast_info reports the regular session close, not the extended session,
+    # so the live price comes from intraday bars fetched with prepost=True.
+    # Indices have no extended session and simply return nothing here.
     live = {}
     try:
-        tk = yf.Tickers(" ".join(symbols))
+        ex = yf.download(symbols, period="1d", interval="5m", prepost=True,
+                         progress=False, auto_adjust=False, threads=True)
+        exc = ex["Close"]
+        if getattr(exc, "ndim", 1) == 1:
+            exc = exc.to_frame(symbols[0])
         for s in symbols:
             try:
-                live[s] = float(tk.tickers[s].fast_info["lastPrice"])
+                ser = exc[s].dropna()
+                if len(ser):
+                    live[s] = float(ser.iloc[-1])
             except Exception:
                 pass
     except Exception as e:
-        print(f"live quotes unavailable: {e}", file=sys.stderr)
+        print(f"extended hours prices unavailable: {e}", file=sys.stderr)
 
     for s in symbols:
         try:
@@ -294,7 +303,7 @@ def get_quotes(symbols):
                 "dollar": last - prev,
                 "ext": ext,
                 "ext_pct": ((ext - last) / last * 100.0)
-                           if ext and abs(ext - last) > 1e-9 else None,
+                           if ext and abs(ext / last - 1) > 0.0002 else None,
                 "session": str(ser.index[-1].date()),
             }
         except Exception as e:
@@ -758,8 +767,9 @@ Return ONLY a JSON object, no markdown fences, with these keys:
 
 "news_picks": array of exactly 10 objects, each {"title": string, "why": string}.
   Pick the headlines that genuinely matter to a long term investor from the
-  list supplied. Copy each title exactly as given, character for character, and
-  do NOT include the source name in square brackets, or the link will break.
+  list supplied, OR from the company news on his own positions. Copy each
+  title exactly as given, character for character, and do NOT include the
+  source name in square brackets, or the link will break.
   "why" is one sentence on why it matters to him. Rank them most important
   first. Prefer stories with real economic or company substance over opinion
   pieces, stock picking listicles, and anything phrased as a prediction or a
@@ -1625,6 +1635,10 @@ def match_link(title, news):
         got = norm(n["title"])
         if got and (got.startswith(want[:40]) or want.startswith(got[:40])):
             return n["link"]
+    for n in news:                       # last resort, strong prefix overlap
+        got = norm(n["title"])
+        if got and want[:25] and (want[:25] in got or got[:25] in want):
+            return n["link"]
     return None
 
 
@@ -1667,7 +1681,14 @@ def portfolio_news_block(rows, earnings, limit=18):
             + body + earnings_block(earnings))
 
 
-def news_block(picks, news):
+def news_block(picks, news, my_news=None):
+    """Render the model's picks. It can choose from the market pool or from
+    company news on his own positions, so both are searched for the link."""
+    pool = list(news) + [
+        {"title": r["title"], "link": r["link"],
+         "source": f"{r['sym']} news", "paywalled": False}
+        for r in (my_news or [])]
+    news = pool
     if picks:
         rows = ""
         for p in picks:
@@ -1758,7 +1779,7 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                  + analysis_box("Macro and news analysis",
                                 brief.get("macro_analysis"), "#f0b429")
                  + "<a id='news'></a>"
-                 + news_block(brief.get("news_picks"), news)
+                 + news_block(brief.get("news_picks"), news, my_news)
                  + "<h2>US economic data today</h2>" + cal_table(cal_today)
                  + "<h2>Coming up this week</h2>" + cal_table(cal_ahead, show_day=True))
 
