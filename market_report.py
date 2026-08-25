@@ -63,13 +63,26 @@ TARGETS_ET = [
 ]
 WINDOW_MIN = 30   # how far either side of a target a run still counts
 
+# Tradable proxies rather than cash indices, so every row has a real
+# extended session. Cash indices like ^GSPC do not trade before the open,
+# which made the pre-market column inconsistent row to row.
 INDEXES = {
-    "^GSPC": "S&P 500",
-    "^DJI": "Dow Jones",
+    "SPY": "S&P 500 (SPY)",
+    "DIA": "Dow Jones (DIA)",
     "QQQ": "Nasdaq 100 (QQQ)",
-    "^RUT": "Russell 2000",
+    "IWM": "Russell 2000 (IWM)",
+    "VIXY": "Volatility (VIXY)",
+    "TLT": "20Y Treasuries (TLT)",
+}
+
+# Kept for the charts, the technicals and the subject line, not displayed
+# in the index table.
+SPOT_INDEXES = {
+    "^GSPC": "S&P 500 index",
+    "^DJI": "Dow Jones index",
+    "^RUT": "Russell 2000 index",
     "^VIX": "VIX",
-    "^TNX": "US 10Y Yield",
+    "^TNX": "US 10Y yield",
 }
 
 SECTORS = {
@@ -695,9 +708,9 @@ def fallback_summary(quotes, fng, movers, cal_today, port):
             return "down"
         return "roughly flat"
 
-    bits = [f"The S&P 500 is {word(p('^GSPC'))} {abs(p('^GSPC')):.2f} percent, "
+    bits = [f"The S&P 500 is {word(p('SPY'))} {abs(p('SPY')):.2f} percent, "
             f"the Nasdaq 100 {word(p('QQQ'))} {abs(p('QQQ')):.2f} percent and "
-            f"the Dow {word(p('^DJI'))} {abs(p('^DJI')):.2f} percent."]
+            f"the Dow {word(p('DIA'))} {abs(p('DIA')):.2f} percent."]
     bits.append(f"Gold is {word(p('GC=F'))} {abs(p('GC=F')):.2f} percent and "
                 f"Bitcoin {word(p('BTC-USD'))} {abs(p('BTC-USD')):.2f} percent.")
     if fng:
@@ -765,7 +778,16 @@ Return ONLY a JSON object, no markdown fences, with these keys:
 
 "lean_reason": string, one sentence, under 20 words, on why.
 
-"news_picks": array of exactly 10 objects, each {"title": string, "why": string}.
+"news_picks": array of exactly 10 objects, each
+  {"title": string, "why": string, "tone": string, "tickers": string}.
+  "tone" must be exactly one of: "high bullish", "lean bullish", "neutral",
+  "lean bearish", "high bearish". Judge the story's implication for markets or
+  for the specific companies involved, not the mood of the writing. Reserve
+  "high" for something that genuinely changes the picture, such as a major
+  policy shift, a big earnings surprise, a war or a shock data print. Most
+  stories are "lean" or "neutral", so do not inflate them. "tickers" is a
+  short comma separated list of affected tickers he holds or watches, or an
+  empty string if none apply.
   Pick the headlines that genuinely matter to a long term investor from the
   list supplied, OR from the company news on his own positions. Copy each
   title exactly as given, character for character, and do NOT include the
@@ -856,7 +878,8 @@ def index_technicals(symbol="^GSPC"):
 
 def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     news, port, analysts, earnings, prev_state, tech=None,
-                    my_news=None):
+                    my_news=None, fundamentals=None, earn_hist=None,
+                    shorted=None):
     """Compact text block handed to the model."""
     def line(names):
         return "; ".join(
@@ -864,7 +887,8 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             for s, lab in names.items() if s in quotes)
 
     parts = [
-        f"US indices: {line(INDEXES)}",
+        f"US markets, tradable index funds: {line(INDEXES)}",
+        f"US cash indices and rates: {line(SPOT_INDEXES)}",
         f"Sectors: {line(SECTORS)}",
         f"Crypto: {line(CRYPTO)}",
         f"Commodities and dollar: {line(COMMODITIES)}",
@@ -916,6 +940,26 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             f"{e['sym']}{' (held)' if e['held'] else ''} "
             f"{'reported' if e['reported'] else 'reports'} "
             f"{e['date'].strftime('%b %d')}" for e in earnings[:14]))
+    if fundamentals:
+        held = [x for x in fundamentals if x in HOLDINGS]
+        parts.append("Valuation on his holdings: " + "; ".join(
+            f"{s_} PE {fundamentals[s_]['pe']:.0f}" if fundamentals[s_].get("pe")
+            else f"{s_} PE n/a"
+            for s_ in held[:16]))
+        parts.append("Full valuation detail: " + "; ".join(
+            f"{s_} fwdPE {fmt(fundamentals[s_]['fwd_pe'])} "
+            f"PS {fmt(fundamentals[s_]['ps'])} PEG {fmt(fundamentals[s_]['peg'], 2)} "
+            f"revgr {fmt(fundamentals[s_]['rev_growth'], 0, '%')}"
+            for s_ in held[:14]))
+    if earn_hist:
+        parts.append("Earnings record, beats out of last four quarters: "
+                     + "; ".join(f"{s_} {v['beats']}/{v['of']}, last surprise "
+                                 f"{v['rows'][-1]['surprise']:+.1f}%"
+                                 for s_, v in list(earn_hist.items())[:14]))
+    if shorted:
+        parts.append("Heavily shorted names he owns or watches: " + "; ".join(
+            f"{r['sym']} {r['short_pct']:.1f}% of float, "
+            f"{fmt(r['short_ratio'], 1)} days to cover" for r in shorted[:10]))
     if my_news:
         parts.append(
             "COMPANY NEWS ON HIS OWN POSITIONS in the last "
@@ -984,6 +1028,77 @@ def get_analysts(symbols):
             }
         except Exception as e:
             print(f"analysts failed {s}: {e}", file=sys.stderr)
+    return out
+
+
+def get_fundamentals(symbols):
+    """Valuation and short interest for each symbol."""
+    out = {}
+    for sym in symbols:
+        try:
+            i = yf.Ticker(sym).info or {}
+            mcap = i.get("marketCap") or 0
+            spf = i.get("shortPercentOfFloat")
+            out[sym] = {
+                "pe": i.get("trailingPE"),
+                "fwd_pe": i.get("forwardPE"),
+                "ps": i.get("priceToSalesTrailing12Months"),
+                "peg": i.get("trailingPegRatio") or i.get("pegRatio"),
+                "pb": i.get("priceToBook"),
+                "ev_ebitda": i.get("enterpriseToEbitda"),
+                "short_pct": (spf * 100) if spf else None,
+                "short_ratio": i.get("shortRatio"),
+                "shares_short": i.get("sharesShort"),
+                "short_prior": i.get("sharesShortPriorMonth"),
+                "mcap": mcap,
+                "rev_growth": (i.get("revenueGrowth") or 0) * 100 or None,
+                "margin": (i.get("profitMargins") or 0) * 100 or None,
+            }
+        except Exception as e:
+            print(f"fundamentals failed {sym}: {e}", file=sys.stderr)
+    return out
+
+
+def get_earnings_history(symbols, quarters=4):
+    """How each name has actually done against estimates recently."""
+    out = {}
+    for sym in symbols:
+        try:
+            eh = yf.Ticker(sym).earnings_history
+            if eh is None or not len(eh):
+                continue
+            rows = []
+            for idx, r in eh.tail(quarters).iterrows():
+                try:
+                    rows.append({
+                        "quarter": str(idx)[:10],
+                        "actual": float(r["epsActual"]),
+                        "estimate": float(r["epsEstimate"]),
+                        "surprise": float(r["surprisePercent"]) * 100,
+                    })
+                except Exception:
+                    continue
+            if rows:
+                beats = sum(1 for r in rows if r["surprise"] > 0)
+                out[sym] = {"rows": rows, "beats": beats, "of": len(rows)}
+        except Exception as e:
+            print(f"earnings history failed {sym}: {e}", file=sys.stderr)
+    return out
+
+
+def heavily_shorted(fundamentals, min_pct=5.0, min_mcap=2e9):
+    """Medium and large caps carrying an unusual short position."""
+    out = []
+    for sym, f in fundamentals.items():
+        if not f.get("short_pct") or f["short_pct"] < min_pct:
+            continue
+        if (f.get("mcap") or 0) < min_mcap:
+            continue
+        trend = None
+        if f.get("shares_short") and f.get("short_prior"):
+            trend = (f["shares_short"] / f["short_prior"] - 1) * 100
+        out.append({**f, "sym": sym, "trend": trend})
+    out.sort(key=lambda r: -r["short_pct"])
     return out
 
 
@@ -1454,6 +1569,26 @@ a { text-decoration: none; }
 """
 
 
+TONE_STYLE = {
+    "high bullish": ("#0b6e3d", "#ffffff", "HIGH BULLISH"),
+    "lean bullish": ("#1f6f43", "#d6f5e2", "lean bullish"),
+    "neutral":      ("#30363d", "#8b949e", "neutral"),
+    "lean bearish": ("#8c3b34", "#ffdedb", "lean bearish"),
+    "high bearish": ("#8c1f18", "#ffffff", "HIGH BEARISH"),
+}
+
+
+def tone_stamp(tone):
+    if not tone:
+        return ""
+    bg, fg, label = TONE_STYLE.get(str(tone).strip().lower(),
+                                   TONE_STYLE["neutral"])
+    return (f"<span style=\"display:inline-block;background:{bg};color:{fg};"
+            f"font-size:10px;font-weight:700;letter-spacing:0.4px;"
+            f"padding:2px 7px;border-radius:9px;white-space:nowrap\">"
+            f"{label}</span>")
+
+
 LEAN_COLORS = {
     "bullish": "#3fb950", "leaning bullish": "#56b36b", "neutral": "#8b949e",
     "leaning bearish": "#e8935b", "bearish": "#f85149",
@@ -1570,6 +1705,78 @@ def portfolio_block(port, ai_note):
             f"<th class='num'>Gain %</th>"
             f"<th class='num'>{session_label().title()}</th></tr>"
             f"{rows}</table>{opts}{foot}")
+
+
+def fmt(v, dp=1, suffix=""):
+    if v is None or v != v:
+        return "-"
+    try:
+        return f"{float(v):,.{dp}f}{suffix}"
+    except Exception:
+        return "-"
+
+
+def valuation_block(fundamentals, earn_hist, port):
+    """Valuation and quality for what he owns, plus how each has delivered."""
+    if not fundamentals:
+        return ""
+    held = set(HOLDINGS)
+    order = ([s for s in fundamentals if s in held]
+             + [s for s in fundamentals if s not in held])
+    rows = ""
+    for sym in order:
+        f = fundamentals[sym]
+        eh = earn_hist.get(sym)
+        beat = (f"{eh['beats']}/{eh['of']}" if eh else "-")
+        last = (f"{eh['rows'][-1]['surprise']:+.1f}%" if eh and eh["rows"] else "-")
+        rows += (
+            f"<tr><td><b>{sym}</b>"
+            + ("<span class='small'> held</span>" if sym in held else "")
+            + f"</td><td class='num'>{fmt(f['mcap'] / 1e9, 1, 'B') if f['mcap'] else '-'}</td>"
+            f"<td class='num'>{fmt(f['pe'])}</td>"
+            f"<td class='num'>{fmt(f['fwd_pe'])}</td>"
+            f"<td class='num'>{fmt(f['ps'])}</td>"
+            f"<td class='num'>{fmt(f['peg'], 2)}</td>"
+            f"<td class='num'>{fmt(f['rev_growth'], 0, '%')}</td>"
+            f"<td class='num'>{fmt(f['margin'], 0, '%')}</td>"
+            f"<td class='num small'>{beat}</td>"
+            f"<td class='num small'>{last}</td></tr>")
+    return ("<h2 id='valuation'>Valuation and earnings record</h2><table>"
+            "<tr><th>Ticker</th><th class='num'>Mkt cap</th><th class='num'>P/E</th>"
+            "<th class='num'>Fwd P/E</th><th class='num'>P/S</th>"
+            "<th class='num'>PEG</th><th class='num'>Rev gr</th>"
+            "<th class='num'>Margin</th><th class='num'>Beats</th>"
+            "<th class='num'>Last surp</th></tr>" + rows + "</table>"
+            "<p class='small'>Beats is how many of the last four quarters came "
+            "in above the estimate. Last surp is the most recent quarter's "
+            "surprise. Forward P/E below trailing means analysts expect earnings "
+            "to grow. PEG under 1 means the multiple is low relative to that "
+            "growth, though the growth estimate behind it can be wrong.</p>")
+
+
+def short_interest_block(shorted, fundamentals):
+    """Medium and large caps carrying an unusual short position."""
+    if not shorted:
+        return ""
+    held = set(HOLDINGS)
+    rows = "".join(
+        f"<tr><td><b>{r['sym']}</b>"
+        + ("<span class='small'> held</span>" if r["sym"] in held else "")
+        + f"</td><td class='num'>{fmt(r['mcap'] / 1e9, 1, 'B')}</td>"
+        f"<td class='num {cls(r['short_pct'] - 8)}'>{fmt(r['short_pct'], 1, '%')}</td>"
+        f"<td class='num'>{fmt(r['short_ratio'], 1)}</td>"
+        f"<td class='num small {cls(r['trend'] or 0)}'>"
+        f"{fmt(r['trend'], 0, '%') if r['trend'] is not None else '-'}</td></tr>"
+        for r in shorted)
+    return ("<h2 id='shorts'>Heavily shorted names</h2><table>"
+            "<tr><th>Ticker</th><th class='num'>Mkt cap</th>"
+            "<th class='num'>Short % float</th><th class='num'>Days to cover</th>"
+            "<th class='num'>vs last month</th></tr>" + rows + "</table>"
+            "<p class='small'>From your holdings and watchlist, filtered to "
+            "names above 2 billion market cap with more than 5 percent of float "
+            "sold short. Days to cover is short interest divided by average "
+            "volume. A rising figure means shorts are adding, a falling one "
+            "means they are covering.</p>")
 
 
 def analyst_block(analysts):
@@ -1702,20 +1909,31 @@ def news_block(picks, news, my_news=None):
                     f"<b>{title}</b></a>") if link else f"<b>{title}</b>"
             tag = (f"<span class='small' style='color:#8b949e'> &middot; {src}</span>"
                    if src else "")
-            rows += (f"<tr><td>{head}{tag}"
+            tick = p.get("tickers", "")
+            tick_tag = (f"<span class='small' style='color:#f0b429'> "
+                        f"&middot; {tick}</span>" if tick else "")
+            rows += (f"<tr><td style='width:96px;vertical-align:top'>"
+                     f"{tone_stamp(p.get('tone'))}</td>"
+                     f"<td>{head}{tag}{tick_tag}"
                      f"<div class='small' style='margin-top:3px'>"
                      f"{p.get('why','')}</div></td></tr>")
-        return "<h2>What actually matters today</h2><table>" + rows + "</table>"
-    return ("<h2>Headlines</h2><table>" + "".join(
-        f"<tr><td><a href='{n['link']}'>{n['title']}</a></td></tr>" for n in news)
-        + "</table>")
+        return ("<h2>What actually matters today</h2><table>" + rows + "</table>"
+                "<p class='small'>The stamp is the story's likely direction for "
+                "markets, not the tone of the writing. Ranked most important "
+                "first.</p>")
+    # No picks came back, usually because no Anthropic key is set. The full
+    # pool already prints at the end of the report, so do not repeat it here.
+    return ("<h2>What actually matters today</h2>"
+            "<p class='small'>No selection was made this run. Every headline "
+            "gathered is listed at the end of the report.</p>")
 
 
 NAV = [
     ("brief", "Brief"), ("portfolio", "Portfolio"), ("charts", "Charts"),
     ("mynews", "Your news"), ("macro", "Macro"), ("news", "Top news"),
     ("movers", "Movers"),
-    ("numbers", "The numbers"), ("allnews", "Every headline"),
+    ("numbers", "The numbers"), ("valuation", "Valuation"),
+    ("shorts", "Shorts"), ("allnews", "Every headline"),
 ]
 
 
@@ -1749,7 +1967,8 @@ def all_news_block(news):
 
 def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                near_ma, brief, ai_used, port, analysts, earnings,
-               my_news=None, for_pdf=False):
+               my_news=None, fundamentals=None, earn_hist=None, shorted=None,
+               for_pdf=False):
     now = dt.datetime.now(LOCAL_TZ)
 
     lede = ("<div class='lede' style=\"background:#161b22;color:#e6edf3;"
@@ -1783,15 +2002,27 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                  + "<h2>US economic data today</h2>" + cal_table(cal_today)
                  + "<h2>Coming up this week</h2>" + cal_table(cal_ahead, show_day=True))
 
-    idx = ("<h2 id='numbers'>US indices and rates</h2><table>"
+    idx = ("<h2 id='numbers'>US markets</h2><table>"
            "<tr><th>Market</th><th class='num'>Close</th>"
            "<th class='num'>Change</th><th class='num'>%</th>"
            f"<th class='num'>{session_label().title()}</th></tr>"
            + quote_rows(INDEXES, quotes) + "</table>"
-           "<p class='small'>All figures are the official close from the last "
-           "completed session, so indices and stocks are on the same clock. The "
-           "final column shows where the live price sits now, which is where any "
-           "pre-market or after hours move appears.</p>")
+           "<p class='small'>These are the tradable funds that track each index, "
+           "so every row has a real extended session and the pre-market column "
+           "means the same thing on every line. Cash indices do not trade before "
+           "the open, which is why they are shown separately below.</p>"
+           "<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+           "font-weight:600'>Cash indices and rates, regular session only</p>"
+           "<table><tr><th>Index</th><th class='num'>Close</th>"
+           "<th class='num'>Change</th><th class='num'>%</th></tr>"
+           + "".join(
+               f"<tr><td>{lab}</td><td class='num'>{quotes[sym]['last']:,.2f}</td>"
+               f"<td class='num {cls(quotes[sym]['dollar'])}'>"
+               f"{quotes[sym]['dollar']:+,.2f}</td>"
+               f"<td class='num {cls(quotes[sym]['pct'])}'>"
+               f"{quotes[sym]['pct']:+.2f}%</td></tr>"
+               for sym, lab in SPOT_INDEXES.items() if sym in quotes)
+           + "</table>")
     sec_market = (idx
                   + "<h2>Sectors, best to worst</h2>"
                   + simple_table(SECTORS, quotes, "Sector", sort=True)
@@ -1799,6 +2030,8 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                   + "<h2>Heat map</h2><img src='cid:heatmap'>"
                   + movers_block(movers) + ma_block(near_ma)
                   + analyst_block(analysts)
+                  + valuation_block(fundamentals or {}, earn_hist or {}, port)
+                  + short_interest_block(shorted or [], fundamentals or {})
                   + "<h2>Crypto</h2>" + simple_table(CRYPTO, quotes, "Coin")
                   + "<h2>Metals, energy and the dollar</h2>"
                   + simple_table(COMMODITIES, quotes, "Contract")
@@ -1904,9 +2137,9 @@ def main():
             print("market closed today, exiting")
             return
 
-    symbols = (list(INDEXES) + list(SECTORS) + list(MEGACAPS)
-               + list(CRYPTO) + list(COMMODITIES) + list(GLOBAL)
-               + list(HOLDINGS))
+    symbols = (list(INDEXES) + list(SPOT_INDEXES) + list(SECTORS)
+               + list(MEGACAPS) + list(CRYPTO) + list(COMMODITIES)
+               + list(GLOBAL) + list(HOLDINGS))
     quotes = get_quotes(sorted(set(symbols)))
 
     sector_items = sorted(
@@ -1937,6 +2170,9 @@ def main():
     analysts = get_analysts(watch[:24])
     earnings = get_earnings(watch)
     my_news = portfolio_news()
+    fundamentals = get_fundamentals(watch)
+    earn_hist = get_earnings_history(watch)
+    shorted = heavily_shorted(fundamentals)
 
     prev = read_state()
     today_key = dt.datetime.now(MARKET_TZ).date().isoformat()
@@ -1945,18 +2181,19 @@ def main():
     tech = index_technicals(CHART_SYMBOL)
     payload = summary_payload(quotes, fng, movers, near_ma, cal_today,
                               cal_ahead, news, port, analysts, earnings,
-                              prev_today, tech, my_news)
+                              prev_today, tech, my_news, fundamentals,
+                              earn_hist, shorted)
     brief, ai_used = ai_brief(payload, [chart, daily], quotes, fng, movers,
                               cal_today, port)
 
     slot = "Weekend review" if args.weekly else (slot_name() or "Market report")
     html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                       near_ma, brief, ai_used, port, analysts, earnings,
-                      my_news)
+                      my_news, fundamentals, earn_hist, shorted)
 
-    spx = quotes.get("^GSPC", {}).get("pct", 0)
+    spx = quotes.get("SPY", {}).get("pct", 0)
     qqq = quotes.get("QQQ", {}).get("pct", 0)
-    subject = f"{slot}: SPX {spx:+.2f}%, QQQ {qqq:+.2f}%"
+    subject = f"{slot}: SPY {spx:+.2f}%, QQQ {qqq:+.2f}%"
     if port:
         subject += f", you {port['day_pl']:+,.0f}"
 
@@ -1970,7 +2207,8 @@ def main():
         open("daily.png", "wb").write(daily)
         pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng,
                               movers, near_ma, brief, ai_used, port, analysts,
-                              earnings, my_news, for_pdf=True)
+                              earnings, my_news, fundamentals, earn_hist,
+                              shorted, for_pdf=True)
         pdf = build_pdf(pdf_html, {"heatmap": heat, "chart": chart,
                                    "daily": daily})
         if pdf:
@@ -1983,7 +2221,8 @@ def main():
     images = {"heatmap": heat, "chart": chart, "daily": daily}
     pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                           near_ma, brief, ai_used, port, analysts, earnings,
-                          my_news, for_pdf=True)
+                          my_news, fundamentals, earn_hist, shorted,
+                          for_pdf=True)
     pdf = build_pdf(pdf_html, images)
     stamp = dt.datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     send_email(subject, html, images, pdf, f"market-report-{stamp}.pdf")
