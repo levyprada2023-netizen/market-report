@@ -377,36 +377,60 @@ def fallback_summary(quotes, fng, movers, cal_today, port):
     return " ".join(bits)
 
 
-AI_SCHEMA = """Return ONLY a JSON object, no markdown fences, with these keys:
+AI_SCHEMA = """You are writing a market report for a 46 year old investor with a
+20 year time horizon. He is financially literate, understands options, leverage
+and technical analysis, and does not need concepts explained. He wants your
+actual read, not hedged neutrality. Write for someone who can handle a direct
+opinion and will make his own decision.
 
-"summary": string. 4 to 6 sentences of plain English for a married couple who
-  are long term investors. What US equities did and why, how bonds, gold and
-  Bitcoin behaved, anything notable overseas, the sentiment reading, the single
-  most important stock story, what is coming on the calendar. Use specific
-  numbers. Factual and calm. No advice, no predictions.
+Return ONLY a JSON object, no markdown fences, with these keys:
 
-"portfolio_note": string, or "" if no portfolio data was supplied. 2 to 3
-  sentences on what their own holdings did today in dollars, which positions
-  drove it, and any holding with earnings coming up. Factual only.
+"summary": string. 4 to 6 sentences. The whole day in plain English, written so
+  his wife could read it over coffee and understand where things stand. What US
+  equities did and why, bonds, gold and Bitcoin, anything notable overseas, the
+  sentiment reading, the biggest single stock story, what is coming. Specific
+  numbers. Calm and factual. This one is a briefing, not analysis.
 
-"chart_read": string. 2 to 4 sentences reading the two attached charts. The
+"portfolio_analysis": string, or "" if no portfolio data was supplied. 5 to 8
+  sentences. Assess the health of the book against a 20 year horizon. Cover:
+  what drove today in dollars, concentration and whether any position has grown
+  into an outsized share, sector tilt, which positions are working and which
+  are dragging, how the holdings sit against analyst targets, and any earnings
+  coming that matter to him specifically. Then give your actual view on what a
+  20 year holder might do from here, including doing nothing, which is often
+  the right answer. Be concrete. Name tickers. If you think something looks
+  stretched or something looks like an opportunity, say so plainly and say why.
+  Do not recommend day trading or short dated options.
+
+"technical_analysis": string. 5 to 8 sentences. Read both attached charts. The
   first is the intraday 5 minute S&P with VWAP in gold and prior close dashed.
-  The second is the daily S&P with 20, 50 and 200 day averages. Describe the
-  shape of the session, whether price held above or below VWAP, where price
-  sits against the daily averages, and whether volume backed the move.
+  The second is the daily S&P with 20, 50 and 200 day averages. Cover the shape
+  of the session, whether price held above or below VWAP and what that says
+  about who was in control, where price sits against each daily average, the
+  trend structure, whether volume confirmed or contradicted the move, and any
+  divergence worth noting. Then give your forecast: what setup is in play, what
+  would confirm it and what would invalidate it. Frame it as scenarios with
+  your lean, not a certainty. Reference actual levels from the data block.
+
+"macro_analysis": string. 6 to 10 sentences. This is the deep one. Work through
+  the economic data released today, what is coming this week, and the headlines
+  supplied. Go past summary into implication: what the data says about growth,
+  inflation and the rate path, how the bond market is positioned versus the
+  equity market, what the sector rotation reveals about what money is doing,
+  what the sentiment reading means in context, and where the risks sit. Draw
+  connections between separate data points that a casual reader would miss.
+  State your bullish or bearish lean and the reasoning behind it. Acknowledge
+  what would change your mind.
+
+"lean": string, exactly one of "bullish", "leaning bullish", "neutral",
+  "leaning bearish", "bearish". Your overall near term read.
+
+"lean_reason": string, one sentence, under 20 words, on why.
 
 "news_picks": array of up to 4 objects, each {"title": string, "why": string}.
-  Pick only the headlines that genuinely matter to a long term investor from
-  the list supplied. Copy the title exactly as given. "why" is one short
-  sentence on why it matters.
-
-"considerations": string. 3 to 5 sentences. This is the only place you may be
-  interpretive. Note what a long term investor might reasonably watch or think
-  about given today's data: valuation stretch or compression, sentiment
-  extremes, positions sitting at technical levels, upcoming catalysts, how
-  analyst targets compare to current prices. Frame everything as observations
-  and questions rather than instructions. Never say buy, sell, trim or add.
-  Never predict a price. Acknowledge uncertainty where it exists.
+  Pick the headlines that genuinely matter to a long term investor from the
+  list supplied. Copy each title exactly as given, character for character, or
+  the link will break. "why" is one sentence on why it matters to him.
 
 NUMBERS RULE, this matters more than anything else above. Every number you
 write must appear verbatim in the MARKET DATA block. Do not estimate a level
@@ -424,8 +448,9 @@ def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
     """One API call returning summary, chart read, news picks and considerations."""
     blank = {
         "summary": fallback_summary(quotes, fng, movers, cal_today, port),
-        "portfolio_note": "", "chart_read": "", "news_picks": [],
-        "considerations": "",
+        "portfolio_analysis": "", "technical_analysis": "",
+        "macro_analysis": "", "lean": "", "lean_reason": "",
+        "news_picks": [],
     }
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
@@ -447,7 +472,7 @@ def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
             headers={"x-api-key": key,
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": AI_MODEL, "max_tokens": 2000,
+            json={"model": AI_MODEL, "max_tokens": 4000,
                   "messages": [{"role": "user", "content": content}]},
             timeout=120)
         r.raise_for_status()
@@ -510,15 +535,25 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
         parts.append(f"CNN Fear and Greed: {fng['score']:.0f} ({fng['rating']}), "
                      f"week ago {fng['week']:.0f}, month ago {fng['month']:.0f}")
     if port:
+        by_weight = sorted(port["rows"], key=lambda r: -r["value"])
+        total = sum(r["value"] for r in port["rows"]) or 1
+        top5 = sum(r["value"] for r in by_weight[:5]) / total * 100
         parts.append(
             f"PORTFOLIO: total {CURRENCY} {port['value']:,.0f}, today "
             f"{port['day_pl']:+,.0f} ({port['day_pct']:+.2f}%). "
-            + ("Total gain " + format(port["total_gain"], "+,.0f") + ". "
+            + ("Total gain since purchase " + format(port["total_gain"], "+,.0f") + ". "
                if port["total_gain"] is not None else "")
-            + "Positions by dollar impact today: "
-            + "; ".join(f"{r['sym']} {r['moved']:+,.0f} ({r['pct']:+.2f}%)"
-                        for r in sorted(port["rows"],
-                                        key=lambda r: -abs(r["moved"]))[:10]))
+            + f"{len(port['rows'])} positions. Top 5 are {top5:.0f}% of the book.")
+        parts.append("Position weights and returns: " + "; ".join(
+            f"{r['sym']} {r['value'] / total * 100:.1f}% of book, "
+            f"{CURRENCY} {r['value']:,.0f}, today {r['pct']:+.2f}% "
+            f"({r['moved']:+,.0f})"
+            + (f", since purchase {r['gain_pct']:+.1f}%"
+               if r.get("gain_pct") is not None else "")
+            for r in by_weight))
+        if port.get("options"):
+            parts.append("Option positions held: " + "; ".join(
+                f"{o['symbol']} qty {o['qty']:,.0f}" for o in port["options"]))
     if analysts:
         parts.append("Analyst targets: " + "; ".join(
             f"{s} price {a['price']:,.2f} vs mean target {a['mean']:,.2f} "
@@ -967,6 +1002,34 @@ def ma_block(near):
             "price often pauses or turns.</p>")
 
 
+LEAN_COLORS = {
+    "bullish": "#3fb950", "leaning bullish": "#56b36b", "neutral": "#8b949e",
+    "leaning bearish": "#e8935b", "bearish": "#f85149",
+}
+
+
+def analysis_box(title, text, accent):
+    """One AI written section, visually distinct from the data tables."""
+    if not text:
+        return ""
+    return (f"<h2>{title}</h2>"
+            f"<div style=\"background:#161b22;color:#e6edf3;border-left:3px solid "
+            f"{accent};border-radius:6px;padding:14px 16px;margin:6px 0 4px;"
+            f"font-size:14px;line-height:1.6\">{text}</div>")
+
+
+def lean_badge(lean, reason):
+    if not lean:
+        return ""
+    col = LEAN_COLORS.get(lean.lower(), "#8b949e")
+    return (f"<div style='margin:12px 0 2px'>"
+            f"<span style=\"display:inline-block;background:{col};color:#0d1117;"
+            f"font-weight:700;font-size:13px;padding:4px 12px;border-radius:12px\">"
+            f"{lean.upper()}</span>"
+            f"<span class='small' style='margin-left:10px;color:#8b949e'>"
+            f"{reason}</span></div>")
+
+
 def portfolio_block(port, ai_note):
     if not port:
         return ""
@@ -984,7 +1047,7 @@ def portfolio_block(port, ai_note):
     total_gain = ("<div class='small'>Total gain since purchase: "
                   f"{port['total_gain']:+,.0f} {CURRENCY}</div>"
                   if port["total_gain"] is not None else "")
-    note = f"<p class='small' style='font-size:14px'>{ai_note}</p>" if ai_note else ""
+    note = ""
 
     opts = ""
     if port.get("options"):
@@ -1101,51 +1164,55 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
             "border-left:3px solid #58a6ff;border-radius:6px;padding:14px 16px;"
             "margin:14px 0 6px;font-size:15px;line-height:1.55\">"
             f"{brief['summary']}</div>")
-    if brief.get("chart_read"):
-        chart_read = ("<p class='small' style=\"font-size:14px;margin:8px 0 0;"
-                      f"color:#8b949e\">{brief['chart_read']}</p>")
-    else:
-        chart_read = ""
-    if brief.get("considerations"):
-        think = ("<h2>Things to think about</h2>"
-                 "<div class='think' style=\"background:#161b22;color:#e6edf3;"
-                 "border-left:3px solid #f0b429;border-radius:6px;padding:14px 16px;"
-                 "margin:6px 0;font-size:14px;line-height:1.55\">"
-                 f"{brief['considerations']}</div>"
-                 "<p class='small'>Written by Claude as observations, not advice. "
-                 "It has no knowledge of your plan, your tax position or your "
-                 "timeline.</p>")
-    else:
-        think = ""
 
     header = (f"<div class='hdr'>{slot}</div>"
               f"<div class='small'>{now.strftime('%A %B %d, %Y at %I:%M %p')} MT</div>"
               f"{lede}"
+              f"{lean_badge(brief.get('lean'), brief.get('lean_reason'))}"
               f"<div class='small' style='margin-bottom:4px'>"
-              f"{'Written by Claude from the data below.' if ai_used else 'Auto generated summary.'}"
+              f"{'Analysis written by Claude. Not advice, and it does not know your plan or tax position.' if ai_used else 'Auto generated summary. Add an Anthropic key for full analysis.'}"
               f"</div>")
 
+    # ---- 1. portfolio, data then analysis
+    sec_portfolio = (portfolio_block(port, None)
+                     + analysis_box("Portfolio analysis",
+                                    brief.get("portfolio_analysis"), "#3fb950"))
+
+    # ---- 2. charts, then technical analysis
+    sec_charts = ("<h2>S&amp;P 500 intraday</h2><img src='cid:chart'>"
+                  "<h2>S&amp;P 500 daily</h2><img src='cid:daily'>"
+                  + analysis_box("Technical analysis",
+                                 brief.get("technical_analysis"), "#a371f7"))
+
+    # ---- 3. macro, news and the deep read
+    econ = ("<h2>US economic data today</h2>" + cal_table(cal_today)
+            + "<h2>Coming up this week</h2>" + cal_table(cal_ahead, show_day=True))
+    sec_macro = (analysis_box("Macro and news analysis",
+                              brief.get("macro_analysis"), "#f0b429")
+                 + news_block(brief.get("news_picks"), news)
+                 + econ)
+
+    # ---- 4. the raw market tables
     idx = ("<h2>US indices and rates</h2><table>"
            "<tr><th>Market</th><th class='num'>Last</th>"
            "<th class='num'>vs prev close</th><th class='num'>vs open</th></tr>"
            + quote_rows(INDEXES, quotes) + "</table>")
+    sec_market = (idx
+                  + "<h2>Sectors, best to worst</h2>"
+                  + simple_table(SECTORS, quotes, "Sector", sort=True)
+                  + fng_block(fng)
+                  + "<h2>Heat map</h2><img src='cid:heatmap'>"
+                  + movers_block(movers) + ma_block(near_ma)
+                  + analyst_block(analysts) + earnings_block(earnings)
+                  + "<h2>Crypto</h2>" + simple_table(CRYPTO, quotes, "Coin")
+                  + "<h2>Metals, energy and the dollar</h2>"
+                  + simple_table(COMMODITIES, quotes, "Contract")
+                  + "<h2>Global markets</h2>" + simple_table(GLOBAL, quotes, "Index")
+                  + "<p class='small'>Asia and Europe are closed during US hours, "
+                    "so these reflect their most recent completed session.</p>")
 
-    sec = "<h2>Sectors, best to worst</h2>" + simple_table(
-        SECTORS, quotes, "Sector", sort=True)
-
-    crypto = "<h2>Crypto</h2>" + simple_table(CRYPTO, quotes, "Coin")
-    comm = "<h2>Metals, energy and the dollar</h2>" + simple_table(
-        COMMODITIES, quotes, "Contract")
-    glob = ("<h2>Global markets</h2>" + simple_table(GLOBAL, quotes, "Index")
-            + "<p class='small'>Asia and Europe are closed during US hours, "
-              "so these reflect their most recent completed session.</p>")
-
-    heat = "<h2>Heat map</h2><img src='cid:heatmap'>"
-    charts = ("<h2>S&amp;P 500 intraday</h2><img src='cid:chart'>"
-              "<h2>S&amp;P 500 daily</h2><img src='cid:daily'>" + chart_read)
-
-    econ = ("<h2>US economic data today</h2>" + cal_table(cal_today)
-            + "<h2>Coming up this week</h2>" + cal_table(cal_ahead, show_day=True))
+    rule = ("<div style='border-top:2px solid #30363d;margin:34px 0 0'></div>"
+            "<p class='small' style='margin:8px 0 0'>THE NUMBERS</p>")
 
     return (f"<html><head><meta charset='utf-8'>"
             f"<meta name='color-scheme' content='dark'>"
@@ -1154,14 +1221,8 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
             f"<body style='margin:0;padding:0;background:#0d1117'>"
             f"<div class='wrap' style=\"background:#0d1117;color:#e6edf3;padding:18px;"
             f"font-family:-apple-system,Segoe UI,Arial,sans-serif\">"
-            f"{header}"
-            f"{portfolio_block(port, brief.get('portfolio_note'))}"
-            f"{think}"
-            f"{news_block(brief.get('news_picks'), news)}"
-            f"{idx}{sec}{fng_block(fng)}{heat}{charts}"
-            f"{movers_block(movers)}{ma_block(near_ma)}"
-            f"{analyst_block(analysts)}{earnings_block(earnings)}"
-            f"{crypto}{comm}{glob}{econ}"
+            f"{header}{sec_portfolio}{sec_charts}{sec_macro}"
+            f"{rule}{sec_market}"
             f"<p class='small'>Generated automatically. Prices and analyst data from "
             f"Yahoo Finance, sentiment from CNN, calendar from Forex Factory.</p>"
             f"</div></body></html>")
