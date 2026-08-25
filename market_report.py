@@ -14,7 +14,9 @@ import argparse
 import base64
 import datetime as dt
 import io
+import itertools
 import json
+import logging
 import os
 import re
 import smtplib
@@ -30,6 +32,10 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import requests
 import yfinance as yf
+
+# ETFs and trusts have no analyst coverage, so yfinance logs 404s for them.
+# Those are expected and handled, so keep them out of the run log.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # ============================== CONFIG ==============================
 
@@ -51,11 +57,9 @@ MARKET_TZ = ZoneInfo("America/New_York")
 # time change on either side of the border. Alberta stops changing clocks
 # on Nov 1 2026, the US does not, and this handles that automatically.
 TARGETS_ET = [
-    (10, 0, "Morning open report"),    # 30 min after the open
-    (12, 30, "Midday report"),
-    (15, 0, "Closing report"),         # 1 hour before the close
+    (16, 10, "Closing report"),      # 10 min after the 4pm ET close
 ]
-WINDOW_MIN = 25   # how far either side of a target a run still counts
+WINDOW_MIN = 30   # how far either side of a target a run still counts
 
 INDEXES = {
     "^GSPC": "S&P 500",
@@ -156,8 +160,27 @@ except Exception:
 CHART_SYMBOL = "^GSPC"
 INTRADAY_INTERVAL = "5m"   # "5m" or "15m"
 INTRADAY_DAYS = 2          # 2 gives yesterday for context in the morning report
-NEWS_FEED = "https://finance.yahoo.com/news/rssindex"
-NEWS_POOL = 30      # headlines gathered, then triaged down by the model
+# News sources. RSS where a live feed exists, a light page scrape where the
+# publisher has abandoned theirs. Each is capped so no single outlet dominates
+# the pool the model triages from.
+# Fields: label, fetch method, url, cap, paywalled
+# Bloomberg's own RSS carries a useful two sentence summary, which is worth
+# feeding the model, but the articles themselves sit behind a subscription.
+# Those are marked so they are used for signal and flagged if linked.
+NEWS_SOURCES = [
+    ("Yahoo Finance", "rss", "https://finance.yahoo.com/news/rssindex", 12, False),
+    ("CNBC", "rss", "https://www.cnbc.com/id/100003114/device/rss/rss.html", 10, False),
+    ("CNBC Economy", "rss", "https://www.cnbc.com/id/20910258/device/rss/rss.html", 8, False),
+    ("Reuters", "rss",
+     "https://news.google.com/rss/search?q=when:1d+site:reuters.com+markets"
+     "+OR+economy&hl=en-US&gl=US&ceid=US:en", 10, False),
+    ("CNN Business", "cnn", "https://www.cnn.com/business", 10, False),
+    ("Bloomberg Markets", "rss",
+     "https://feeds.bloomberg.com/markets/news.rss", 8, True),
+    ("Bloomberg Economics", "rss",
+     "https://feeds.bloomberg.com/economics/news.rss", 6, True),
+]
+NEWS_POOL = 50      # headlines gathered, then triaged down by the model
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 # ============================== DATA ==============================
@@ -193,16 +216,89 @@ def get_history(symbol, period="9mo"):
     return df
 
 
-def get_news(limit=8):
-    feed = feedparser.parse(NEWS_FEED)
-    items = []
-    for e in feed.entries[:limit]:
-        items.append({
-            "title": e.get("title", ""),
-            "link": e.get("link", ""),
-            "source": e.get("source", {}).get("title", "Yahoo Finance"),
-        })
-    return items
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/125.0 Safari/537.36")
+
+
+def _clean(text, limit=260):
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = re.sub(r"&[a-z]+;|&#\d+;", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+def _rss_items(url, cap, source, paywalled=False):
+    r = requests.get(url, timeout=25, headers={"User-Agent": UA})
+    r.raise_for_status()
+    feed = feedparser.parse(r.content)
+    out = []
+    for e in feed.entries[:cap]:
+        title = (e.get("title") or "").strip()
+        if not title:
+            continue
+        # Google News wraps the outlet name onto the end of the title
+        title = re.sub(r"\s+-\s+(Reuters|Reuters\.com)\s*$", "", title)
+        out.append({"title": title, "link": e.get("link", ""),
+                    "source": source, "paywalled": paywalled,
+                    "summary": _clean(e.get("summary") or e.get("description"))})
+    return out
+
+
+def _cnn_items(url, cap, source):
+    """CNN abandoned their RSS feeds, so read the business page instead."""
+    r = requests.get(url, timeout=25, headers={"User-Agent": UA})
+    r.raise_for_status()
+    html = r.text
+    pattern = re.compile(
+        r'href="(/\d{4}/\d{2}/\d{2}/[^"]+)"[^>]*>.{0,600}?'
+        r'container__headline-text[^>]*>([^<]{15,160})<', re.S)
+    seen, out = set(), []
+    for href, title in pattern.findall(html):
+        title = re.sub(r"\s+", " ", title).strip()
+        title = title.replace("&#8217;", "\u2019").replace("&amp;", "&")
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        out.append({"title": title, "link": "https://www.cnn.com" + href,
+                    "source": source, "paywalled": False, "summary": ""})
+        if len(out) >= cap:
+            break
+    if not out:                      # markup changed, fall back to headlines only
+        for title in re.findall(
+                r'container__headline-text[^>]*>([^<]{15,160})<', html)[:cap]:
+            title = re.sub(r"\s+", " ", title).strip()
+            if title and title not in seen:
+                seen.add(title)
+                out.append({"title": title, "link": url, "source": source,
+                            "paywalled": False, "summary": ""})
+    return out
+
+
+def get_news(limit=NEWS_POOL):
+    """Gather headlines from every source, interleaved so one cannot dominate."""
+    buckets = []
+    for source, kind, url, cap, paywalled in NEWS_SOURCES:
+        try:
+            items = (_cnn_items(url, cap, source) if kind == "cnn"
+                     else _rss_items(url, cap, source, paywalled))
+            if items:
+                buckets.append(items)
+            else:
+                print(f"news source empty: {source}", file=sys.stderr)
+        except Exception as e:
+            print(f"news source failed {source}: {e}", file=sys.stderr)
+
+    merged, seen = [], set()
+    for row in itertools.zip_longest(*buckets):
+        for item in row:
+            if not item:
+                continue
+            key = re.sub(r"[^a-z0-9]", "", item["title"].lower())[:60]
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged[:limit]
 
 
 def get_fear_greed():
@@ -429,8 +525,12 @@ Return ONLY a JSON object, no markdown fences, with these keys:
 
 "news_picks": array of up to 4 objects, each {"title": string, "why": string}.
   Pick the headlines that genuinely matter to a long term investor from the
-  list supplied. Copy each title exactly as given, character for character, or
-  the link will break. "why" is one sentence on why it matters to him.
+  list supplied. Copy each title exactly as given, character for character, and
+  do NOT include the source name in square brackets, or the link will break.
+  "why" is one sentence on why it matters to him. Prefer stories with real
+  economic or company substance over opinion pieces, stock picking listicles,
+  and anything phrased as a prediction or a teaser. Spread the picks across
+  outlets where the quality is comparable.
 
 NUMBERS RULE, this matters more than anything else above. Every number you
 write must appear verbatim in the MARKET DATA block. Do not estimate a level
@@ -579,10 +679,23 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
         parts.append("Rest of week: " + "; ".join(
             f"{c['day']} {c['title']}" for c in cal_ahead[:10]))
     if prev_state.get("summary"):
-        parts.append("EARLIER REPORT TODAY (say what changed since this, do not "
-                     f"repeat it): {prev_state['summary']}")
-    parts.append("HEADLINES, pick the ones that matter:\n" + "\n".join(
-        f"- {n['title']}" for n in news))
+        parts.append("YESTERDAY'S REPORT (note what has changed since this "
+                     "where it is relevant, do not simply repeat it): "
+                     f"{prev_state['summary']}")
+    lines = []
+    for n in news:
+        tag = f"[{n['source']}{' PAYWALLED' if n.get('paywalled') else ''}]"
+        lines.append(f"- {tag} {n['title']}"
+                     + (f"\n    {n['summary']}" if n.get("summary") else ""))
+    parts.append(
+        "HEADLINES from Yahoo Finance, CNBC, Reuters, CNN Business and "
+        "Bloomberg, some with a summary line beneath. Use all of them to "
+        "inform your macro analysis. When choosing news_picks, prefer stories "
+        "the reader can actually open: items marked PAYWALLED need a "
+        "subscription, so only pick one if it is clearly more important than "
+        "the free alternatives. Judge on merit, not outlet, and skip "
+        "clickbait, listicles and prediction teasers. Fewer than four picks is "
+        "fine if fewer than four matter:\n" + "\n".join(lines))
     return "\n\n".join(parts)
 
 
@@ -1123,6 +1236,7 @@ def match_link(title, news):
     def norm(t):
         return re.sub(r"[^a-z0-9]", "", (t or "").lower())
 
+    title = re.sub(r"^\s*\[[^\]]{1,30}\]\s*", "", title or "")
     want = norm(title)
     if not want:
         return None
@@ -1140,17 +1254,25 @@ def news_block(picks, news):
     if picks:
         rows = ""
         for p in picks:
-            title = p.get("title", "")
+            title = re.sub(r"^\s*\[[^\]]{1,30}\]\s*", "", p.get("title", ""))
             link = match_link(title, news)
+            entry = next((n for n in news if n["link"] == link and link), None)
+            src = entry["source"] if entry else ""
+            if entry and entry.get("paywalled"):
+                src += ", subscription"
             head = (f"<a href='{link}' style='color:#79c0ff;text-decoration:none'>"
                     f"<b>{title}</b></a>") if link else f"<b>{title}</b>"
-            rows += (f"<tr><td>{head}"
+            tag = (f"<span class='small' style='color:#8b949e'> &middot; {src}</span>"
+                   if src else "")
+            rows += (f"<tr><td>{head}{tag}"
                      f"<div class='small' style='margin-top:3px'>"
                      f"{p.get('why','')}</div></td></tr>")
         return ("<h2>What actually matters today</h2><table>" + rows + "</table>"
                 "<details><summary class='small'>All headlines</summary><table>"
-                + "".join(f"<tr><td><a href='{n['link']}'>{n['title']}</a></td></tr>"
-                          for n in news) + "</table></details>")
+                + "".join(
+                    f"<tr><td><a href='{n['link']}'>{n['title']}</a>"
+                    f"<span class='small'> &middot; {n['source']}</span></td></tr>"
+                    for n in news) + "</table></details>")
     return ("<h2>Headlines</h2><table>" + "".join(
         f"<tr><td><a href='{n['link']}'>{n['title']}</a></td></tr>" for n in news)
         + "</table>")
