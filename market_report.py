@@ -140,6 +140,13 @@ NEE DUK SO D AEP
 """.split()
 
 MA_NEAR_PCT = 2.0    # how close to a moving average counts as "near"
+
+# Always checked in the movers section regardless of how much they moved,
+# alongside everything in the portfolio.
+WATCHLIST = """
+MRNA JPM DELL USAR SKHY MU SHOP PLTR INTC RGTI IONQ AMD DIS CVNA CAKE
+KO MCD SPY QQQ
+""".split()
 AI_MODEL = "claude-sonnet-4-6"
 STATE_FILE = "state.json"
 
@@ -168,19 +175,48 @@ INTRADAY_DAYS = 2          # 2 gives yesterday for context in the morning report
 # feeding the model, but the articles themselves sit behind a subscription.
 # Those are marked so they are used for signal and flagged if linked.
 NEWS_SOURCES = [
-    ("Yahoo Finance", "rss", "https://finance.yahoo.com/news/rssindex", 12, False),
-    ("CNBC", "rss", "https://www.cnbc.com/id/100003114/device/rss/rss.html", 10, False),
-    ("CNBC Economy", "rss", "https://www.cnbc.com/id/20910258/device/rss/rss.html", 8, False),
-    ("Reuters", "rss",
-     "https://news.google.com/rss/search?q=when:1d+site:reuters.com+markets"
-     "+OR+economy&hl=en-US&gl=US&ceid=US:en", 10, False),
-    ("CNN Business", "cnn", "https://www.cnn.com/business", 10, False),
+    # label, method, url, cap, paywalled
+    # Wire services and broad business desks
+    ("Reuters", "rss", "https://news.google.com/rss/search?q=when:1d+site:reuters.com"
+     "+markets+OR+economy&hl=en-US&gl=US&ceid=US:en", 9, False),
+    ("AP", "rss", "https://news.google.com/rss/search?q=when:1d+site:apnews.com"
+     "+business+OR+economy&hl=en-US&gl=US&ceid=US:en", 7, False),
+    ("CNBC", "rss", "https://www.cnbc.com/id/100003114/device/rss/rss.html", 8, False),
+    ("CNBC Economy", "rss", "https://www.cnbc.com/id/20910258/device/rss/rss.html", 7, False),
+    ("Yahoo Finance", "rss", "https://finance.yahoo.com/news/rssindex", 8, False),
+    ("MarketWatch", "rss",
+     "https://feeds.content.dowjones.io/public/rss/mw_topstories", 6, False),
+    ("CNN Business", "cnn", "https://www.cnn.com/business", 8, False),
+    ("BBC Business", "rss", "https://feeds.bbci.co.uk/news/business/rss.xml", 6, False),
+    ("Fortune", "rss", "https://fortune.com/feed/", 5, False),
+    ("Seeking Alpha", "rss", "https://seekingalpha.com/market_currents.xml", 6, False),
+
+    # Canadian, since part of the book is listed in Canada
+    ("Globe and Mail", "rss",
+     "https://www.theglobeandmail.com/arc/outboundfeeds/rss/category/business/", 6, False),
+    ("CBC Business", "rss", "https://www.cbc.ca/webfeed/rss/rss-business", 5, False),
+
+    # Asia, which sets the tone before the US opens
+    ("SCMP Business", "rss", "https://www.scmp.com/rss/92/feed", 5, False),
+
+    # Official sources, no spin
+    ("Federal Reserve", "rss",
+     "https://www.federalreserve.gov/feeds/press_all.xml", 4, False),
+
+    # Headlines and summaries are free, full articles need a subscription
     ("Bloomberg Markets", "rss",
-     "https://feeds.bloomberg.com/markets/news.rss", 8, True),
+     "https://feeds.bloomberg.com/markets/news.rss", 7, True),
     ("Bloomberg Economics", "rss",
-     "https://feeds.bloomberg.com/economics/news.rss", 6, True),
+     "https://feeds.bloomberg.com/economics/news.rss", 5, True),
+    ("WSJ Markets", "rss",
+     "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain", 6, True),
+    ("Financial Times", "rss", "https://news.google.com/rss/search?q=when:1d"
+     "+site:ft.com+markets+OR+economy&hl=en-US&gl=US&ceid=US:en", 5, True),
+    ("Barron's", "rss", "https://news.google.com/rss/search?q=when:1d"
+     "+site:barrons.com&hl=en-US&gl=US&ceid=US:en", 5, True),
 ]
-NEWS_POOL = 50      # headlines gathered, then triaged down by the model
+NEWS_POOL = 110     # headlines gathered, then triaged down by the model
+NEWS_PICKS = 10     # how many make the front of the report
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 # ============================== DATA ==============================
@@ -365,7 +401,8 @@ def get_calendar():
 
 def scan_universe():
     """One batched download, used for both the movers list and the MA scan."""
-    df = yf.download(UNIVERSE, period="1y", interval="1d", progress=False,
+    tickers = sorted(set(UNIVERSE) | set(WATCHLIST) | set(HOLDINGS))
+    df = yf.download(tickers, period="1y", interval="1d", progress=False,
                      auto_adjust=False, threads=True)
     close, vol = df["Close"], df["Volume"]
     close = close.dropna(axis=1, how="all")
@@ -394,13 +431,26 @@ def scan_universe():
     return rows
 
 
-def hot_stocks(rows, n=6):
-    """Biggest movers, weighted toward names also trading unusual volume."""
-    scored = [r for r in rows if abs(r["pct"]) >= 1.5]
-    scored.sort(key=lambda r: abs(r["pct"]) * (1 + min(r["rvol"], 4) / 4),
+def hot_stocks(rows, n=8):
+    """Biggest movers, plus everything on the watchlist and in the portfolio."""
+    tracked = set(WATCHLIST) | set(HOLDINGS)
+
+    movers = [r for r in rows if abs(r["pct"]) >= 1.5 and r["sym"] not in tracked]
+    movers.sort(key=lambda r: abs(r["pct"]) * (1 + min(r["rvol"], 4) / 4),
                 reverse=True)
-    picks = scored[:n]
-    for p in picks:
+    for r in movers:
+        r["why"] = "unusual move"
+
+    watched = [r for r in rows if r["sym"] in tracked]
+    watched.sort(key=lambda r: -abs(r["pct"]))
+    for r in watched:
+        r["why"] = ("held and watched" if r["sym"] in HOLDINGS
+                    and r["sym"] in WATCHLIST else
+                    "held" if r["sym"] in HOLDINGS else "watchlist")
+
+    picks = movers[:n] + watched
+    # headlines only for the ones that actually moved, to keep the run quick
+    for p in sorted(picks, key=lambda r: -abs(r["pct"]))[:10]:
         p["news"] = symbol_news(p["sym"])
     return picks
 
@@ -523,14 +573,16 @@ Return ONLY a JSON object, no markdown fences, with these keys:
 
 "lean_reason": string, one sentence, under 20 words, on why.
 
-"news_picks": array of up to 4 objects, each {"title": string, "why": string}.
+"news_picks": array of exactly 10 objects, each {"title": string, "why": string}.
   Pick the headlines that genuinely matter to a long term investor from the
   list supplied. Copy each title exactly as given, character for character, and
   do NOT include the source name in square brackets, or the link will break.
-  "why" is one sentence on why it matters to him. Prefer stories with real
-  economic or company substance over opinion pieces, stock picking listicles,
-  and anything phrased as a prediction or a teaser. Spread the picks across
-  outlets where the quality is comparable.
+  "why" is one sentence on why it matters to him. Rank them most important
+  first. Prefer stories with real economic or company substance over opinion
+  pieces, stock picking listicles, and anything phrased as a prediction or a
+  teaser. Spread the picks across outlets rather than taking several from one.
+  Cover different ground with each pick: macro, rates, a major company, the
+  sector he is exposed to, and anything overseas that matters.
 
 NUMBERS RULE, this matters more than anything else above. Every number you
 write must appear verbatim in the MARKET DATA block. Do not estimate a level
@@ -644,6 +696,12 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             + ("Total gain since purchase " + format(port["total_gain"], "+,.0f") + ". "
                if port["total_gain"] is not None else "")
             + f"{len(port['rows'])} positions. Top 5 are {top5:.0f}% of the book.")
+        if len(port.get("accounts", [])) > 1:
+            parts.append("By account, each in its own currency: " + "; ".join(
+                f"{a['cur']} {a['value']:,.0f}, today {a['day_pl']:+,.0f}, "
+                + (f"gain since purchase {a['gain']:+,.0f} ({a['gain_pct']:+.2f}%)"
+                   if a["gain"] is not None else "gain unknown")
+                for a in port["accounts"]))
         parts.append("Position weights and returns: " + "; ".join(
             f"{r['sym']} {r['value'] / total * 100:.1f}% of book, "
             f"{CURRENCY} {r['value']:,.0f}, today {r['pct']:+.2f}% "
@@ -764,11 +822,14 @@ def fx_rates(symbols):
 
 
 def portfolio_view(quotes):
-    """Value the holdings and rank positions by today's dollar impact."""
+    """Value the holdings, split by listing currency so the totals reconcile
+    against a broker that keeps USD and CAD as separate accounts."""
     if not HOLDINGS:
         return None
     rates = fx_rates(HOLDINGS.keys())
-    rows, value, day_pl, cost_basis, missing = [], 0.0, 0.0, 0.0, []
+    rows, missing = [], []
+    books = {}          # per currency subtotals, in that currency
+
     for sym, shares in HOLDINGS.items():
         q = quotes.get(sym)
         if not q:
@@ -776,30 +837,63 @@ def portfolio_view(quotes):
             continue
         cur = currency_of(sym)
         fx = rates.get(cur, 1.0)
-        val = q["last"] * shares * fx
-        moved = (q["last"] - q["prev"]) * shares * fx
-        value += val
-        day_pl += moved
+        native_val = q["last"] * shares
+        native_moved = (q["last"] - q["prev"]) * shares
         book = BOOK_COST.get(sym)
-        if book:
-            cost_basis += book * shares * fx
+        native_cost = book * shares if book else None
+
+        b = books.setdefault(cur, {"value": 0.0, "moved": 0.0, "cost": 0.0,
+                                   "has_cost": False, "fx": fx, "n": 0})
+        b["value"] += native_val
+        b["moved"] += native_moved
+        b["n"] += 1
+        if native_cost is not None:
+            b["cost"] += native_cost
+            b["has_cost"] = True
+
         rows.append({
             "sym": sym, "shares": shares, "price": q["last"],
-            "pct": q["pct"], "value": val, "moved": moved,
-            "cur": cur,
+            "pct": q["pct"], "cur": cur,
+            "value": native_val * fx,          # reporting currency
+            "moved": native_moved * fx,
+            "native_value": native_val,
+            "native_gain": (native_val - native_cost) if native_cost is not None else None,
             "gain_pct": (q["last"] / book - 1) * 100 if book else None,
         })
+
     if not rows:
         return None
     if missing:
         print(f"no quote for: {', '.join(missing)}", file=sys.stderr)
+
+    value = sum(b["value"] * b["fx"] for b in books.values())
+    day_pl = sum(b["moved"] * b["fx"] for b in books.values())
+    cost = sum(b["cost"] * b["fx"] for b in books.values() if b["has_cost"])
     prev_value = value - day_pl
+
+    accounts = []
+    for cur in sorted(books, key=lambda c: -books[c]["value"]):
+        b = books[cur]
+        prev = b["value"] - b["moved"]
+        accounts.append({
+            "cur": cur,
+            "positions": b["n"],
+            "value": b["value"],
+            "day_pl": b["moved"],
+            "day_pct": (b["moved"] / prev * 100) if prev else 0.0,
+            "gain": (b["value"] - b["cost"]) if b["has_cost"] else None,
+            "gain_pct": ((b["value"] / b["cost"] - 1) * 100
+                         if b["has_cost"] and b["cost"] else None),
+            "fx": b["fx"],
+        })
+
     return {
         "rows": rows,
+        "accounts": accounts,
         "value": value + CASH,
         "day_pl": day_pl,
         "day_pct": (day_pl / prev_value * 100) if prev_value else 0.0,
-        "total_gain": (value - cost_basis) if cost_basis else None,
+        "total_gain": (value - cost) if cost else None,
         "missing": missing,
         "options": OPTIONS,
         "source": POSITIONS_SOURCE,
@@ -1073,11 +1167,9 @@ def cal_table(rows, show_day=False):
             f"<th class='num'>Prior</th></tr>{out}</table>")
 
 
-def movers_block(movers):
-    if not movers:
-        return ""
+def _mover_rows(rows):
     cards = []
-    for m in movers:
+    for m in rows:
         heads = "".join(
             f"<div class='small' style='margin-top:3px'>"
             f"<a href='{n['link']}'>{n['title']}</a></div>"
@@ -1088,12 +1180,26 @@ def movers_block(movers):
             f"<td class='num {cls(m['pct'])}' style='width:70px'>{m['pct']:+.2f}%</td>"
             f"<td class='num small' style='width:60px'>{m['rvol']:.1f}x</td>"
             f"<td>{heads or '<span class=small>no fresh headlines</span>'}</td></tr>")
-    return ("<h2>Stocks getting attention</h2><table>"
-            "<tr><th>Ticker</th><th class='num'>Price</th><th class='num'>Change</th>"
-            "<th class='num'>Volume</th><th>Why</th></tr>"
-            + "".join(cards) + "</table>"
-            "<p class='small'>Volume column is today against the 20 day average. "
-            "Above 1.5x means unusual participation.</p>")
+    return "".join(cards)
+
+
+def movers_block(movers):
+    if not movers:
+        return ""
+    tracked = set(WATCHLIST) | set(HOLDINGS)
+    moving = [m for m in movers if m["sym"] not in tracked]
+    watched = [m for m in movers if m["sym"] in tracked]
+    head = ("<tr><th>Ticker</th><th class='num'>Price</th><th class='num'>Change</th>"
+            "<th class='num'>Volume</th><th>Why</th></tr>")
+    out = ""
+    if moving:
+        out += (f"<h2 id='movers'>Stocks getting attention</h2><table>{head}"
+                + _mover_rows(moving) + "</table>")
+    if watched:
+        out += (f"<h2 id='watchlist'>Your watchlist and holdings</h2><table>{head}"
+                + _mover_rows(watched) + "</table>")
+    return out + ("<p class='small'>Volume column is today against the 20 day "
+                  "average. Above 1.5x means unusual participation.</p>")
 
 
 def ma_block(near):
@@ -1113,6 +1219,17 @@ def ma_block(near):
             f"<p class='small'>Names within {MA_NEAR_PCT:.0f} percent of their 20, 50 "
             "or 200 day average, longest average first. These are the levels where "
             "price often pauses or turns.</p>")
+
+
+PDF_CSS = """
+@page { size: A4; margin: 14mm 12mm; background: #0d1117; }
+.wrap { padding: 0 !important; }
+h2 { page-break-after: avoid; }
+table { page-break-inside: auto; }
+tr { page-break-inside: avoid; }
+img { max-width: 100%; page-break-inside: avoid; }
+a { text-decoration: none; }
+"""
 
 
 LEAN_COLORS = {
@@ -1147,8 +1264,36 @@ def portfolio_block(port, ai_note):
     if not port:
         return ""
     col = "up" if port["day_pl"] > 0 else ("dn" if port["day_pl"] < 0 else "flat")
+
+    # per currency subtotals, so the figures reconcile against the broker
+    acc = ""
+    if len(port.get("accounts", [])) > 1:
+        arows = "".join(
+            f"<tr><td><b>{a['cur']}</b> account</td>"
+            f"<td class='num small'>{a['positions']}</td>"
+            f"<td class='num'>{a['cur']} {a['value']:,.0f}</td>"
+            f"<td class='num {cls(a['day_pl'])}'>{a['day_pl']:+,.0f}</td>"
+            f"<td class='num {cls(a['day_pct'])}'>{a['day_pct']:+.2f}%</td>"
+            f"<td class='num {cls(a['gain'] or 0)}'>"
+            f"{format(a['gain'], '+,.0f') if a['gain'] is not None else '-'}</td>"
+            f"<td class='num {cls(a['gain_pct'] or 0)}'>"
+            f"{format(a['gain_pct'], '+.2f') + '%' if a['gain_pct'] is not None else '-'}"
+            f"</td></tr>" for a in port["accounts"])
+        acc = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+               "font-weight:600'>By account, each in its own currency</p><table>"
+               "<tr><th>Account</th><th class='num'>Pos</th><th class='num'>Value</th>"
+               "<th class='num'>Day</th><th class='num'>Day %</th>"
+               "<th class='num'>Gain</th><th class='num'>Gain %</th></tr>"
+               + arows + "</table>"
+               "<p class='small'>These match what your broker shows per account. "
+               "The combined figure above converts everything into "
+               f"{CURRENCY}, so a losing position in another currency pulls it "
+               "down even when the account you are looking at is up.</p>")
+
     rows = "".join(
-        f"<tr><td><b>{r['sym']}</b></td>"
+        f"<tr><td><b>{r['sym']}</b>"
+        f"{'' if r['cur'] == CURRENCY else chr(32) + '<span class=small>' + r['cur'] + '</span>'}"
+        f"</td>"
         f"<td class='num'>{r['shares']:,.0f}</td>"
         f"<td class='num'>{r['price']:,.2f}</td>"
         f"<td class='num {cls(r['pct'])}'>{r['pct']:+.2f}%</td>"
@@ -1157,10 +1302,10 @@ def portfolio_block(port, ai_note):
         f"<td class='num {cls(r['gain_pct'] or 0)}'>"
         f"{format(r['gain_pct'], '+.1f') + '%' if r['gain_pct'] is not None else '-'}</td></tr>"
         for r in sorted(port["rows"], key=lambda r: -abs(r["moved"])))
+
     total_gain = ("<div class='small'>Total gain since purchase: "
-                  f"{port['total_gain']:+,.0f} {CURRENCY}</div>"
+                  f"{port['total_gain']:+,.0f} {CURRENCY} across all accounts</div>"
                   if port["total_gain"] is not None else "")
-    note = ""
 
     opts = ""
     if port.get("options"):
@@ -1177,20 +1322,23 @@ def portfolio_block(port, ai_note):
 
     footnotes = []
     if port.get("fx"):
-        footnotes.append("Foreign listings converted at " + ", ".join(
-            f"1 {c} = {r:.4f} USD" for c, r in port["fx"].items()))
+        footnotes.append("Converted at " + ", ".join(
+            f"1 {c} = {r:.4f} {CURRENCY}" for c, r in port["fx"].items()))
     if port.get("missing"):
         footnotes.append("No quote found for " + ", ".join(port["missing"]))
     footnotes.append(f"Positions read from {port.get('source', 'config')}")
     foot = "<p class='small'>" + ". ".join(footnotes) + ".</p>"
+
     return (f"<h2>Your portfolio</h2>"
             f"<div style='font-size:24px;font-weight:700'>"
             f"{CURRENCY} {port['value']:,.0f}</div>"
             f"<div class='{col}' style='font-size:16px;font-weight:600'>"
             f"{port['day_pl']:+,.0f} today ({port['day_pct']:+.2f}%)</div>"
-            f"{total_gain}{note}<table>"
+            f"{total_gain}{acc}"
+            f"<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+            f"font-weight:600'>Positions, by size of today's move</p><table>"
             f"<tr><th>Ticker</th><th class='num'>Shares</th><th class='num'>Price</th>"
-            f"<th class='num'>Today</th><th class='num'>Value</th>"
+            f"<th class='num'>Today</th><th class='num'>Value {CURRENCY}</th>"
             f"<th class='num'>Day P/L</th><th class='num'>Gain</th></tr>"
             f"{rows}</table>{opts}{foot}")
 
@@ -1278,8 +1426,43 @@ def news_block(picks, news):
         + "</table>")
 
 
+NAV = [
+    ("brief", "Brief"), ("portfolio", "Portfolio"), ("charts", "Charts"),
+    ("macro", "Macro"), ("news", "Top news"), ("movers", "Movers"),
+    ("numbers", "The numbers"), ("allnews", "All headlines"),
+]
+
+
+def nav_bar():
+    links = " &nbsp;|&nbsp; ".join(
+        f"<a href='#{a}' style='color:#79c0ff;text-decoration:none'>{lab}</a>"
+        for a, lab in NAV)
+    return (f"<div style=\"background:#161b22;border-radius:6px;padding:10px 14px;"
+            f"margin:10px 0 4px;font-size:13px;color:#8b949e\">{links}</div>")
+
+
+def all_news_block(news):
+    by_source = {}
+    for n in news:
+        by_source.setdefault(n["source"], []).append(n)
+    out = ""
+    for source in sorted(by_source):
+        rows = "".join(
+            f"<tr><td><a href='{n['link']}'>{n['title']}</a>"
+            + ("<span class='small'> &middot; subscription</span>"
+               if n.get("paywalled") else "")
+            + (f"<div class='small' style='margin-top:2px'>{n['summary']}</div>"
+               if n.get("summary") else "")
+            + "</td></tr>" for n in by_source[source])
+        out += (f"<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+                f"font-weight:600'>{source}</p><table>{rows}</table>")
+    return (f"<h2 id='allnews'>Every headline gathered</h2>"
+            f"<p class='small'>{len(news)} stories from {len(by_source)} outlets, "
+            f"grouped by source. The ten above were selected from these.</p>{out}")
+
+
 def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
-               near_ma, brief, ai_used, port, analysts, earnings):
+               near_ma, brief, ai_used, port, analysts, earnings, for_pdf=False):
     now = dt.datetime.now(LOCAL_TZ)
 
     lede = ("<div class='lede' style=\"background:#161b22;color:#e6edf3;"
@@ -1287,35 +1470,32 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
             "margin:14px 0 6px;font-size:15px;line-height:1.55\">"
             f"{brief['summary']}</div>")
 
-    header = (f"<div class='hdr'>{slot}</div>"
+    header = (f"<div class='hdr' id='brief'>{slot}</div>"
               f"<div class='small'>{now.strftime('%A %B %d, %Y at %I:%M %p')} MT</div>"
-              f"{lede}"
+              f"{nav_bar()}{lede}"
               f"{lean_badge(brief.get('lean'), brief.get('lean_reason'))}"
               f"<div class='small' style='margin-bottom:4px'>"
               f"{'Analysis written by Claude. Not advice, and it does not know your plan or tax position.' if ai_used else 'Auto generated summary. Add an Anthropic key for full analysis.'}"
               f"</div>")
 
-    # ---- 1. portfolio, data then analysis
-    sec_portfolio = (portfolio_block(port, None)
+    sec_portfolio = ("<a id='portfolio'></a>" + portfolio_block(port, None)
                      + analysis_box("Portfolio analysis",
                                     brief.get("portfolio_analysis"), "#3fb950"))
 
-    # ---- 2. charts, then technical analysis
-    sec_charts = ("<h2>S&amp;P 500 intraday</h2><img src='cid:chart'>"
+    sec_charts = ("<h2 id='charts'>S&amp;P 500 intraday</h2><img src='cid:chart'>"
                   "<h2>S&amp;P 500 daily</h2><img src='cid:daily'>"
                   + analysis_box("Technical analysis",
                                  brief.get("technical_analysis"), "#a371f7"))
 
-    # ---- 3. macro, news and the deep read
-    econ = ("<h2>US economic data today</h2>" + cal_table(cal_today)
-            + "<h2>Coming up this week</h2>" + cal_table(cal_ahead, show_day=True))
-    sec_macro = (analysis_box("Macro and news analysis",
-                              brief.get("macro_analysis"), "#f0b429")
+    sec_macro = ("<a id='macro'></a>"
+                 + analysis_box("Macro and news analysis",
+                                brief.get("macro_analysis"), "#f0b429")
+                 + "<a id='news'></a>"
                  + news_block(brief.get("news_picks"), news)
-                 + econ)
+                 + "<h2>US economic data today</h2>" + cal_table(cal_today)
+                 + "<h2>Coming up this week</h2>" + cal_table(cal_ahead, show_day=True))
 
-    # ---- 4. the raw market tables
-    idx = ("<h2>US indices and rates</h2><table>"
+    idx = ("<h2 id='numbers'>US indices and rates</h2><table>"
            "<tr><th>Market</th><th class='num'>Last</th>"
            "<th class='num'>vs prev close</th><th class='num'>vs open</th></tr>"
            + quote_rows(INDEXES, quotes) + "</table>")
@@ -1333,27 +1513,44 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                   + "<p class='small'>Asia and Europe are closed during US hours, "
                     "so these reflect their most recent completed session.</p>")
 
-    rule = ("<div style='border-top:2px solid #30363d;margin:34px 0 0'></div>"
-            "<p class='small' style='margin:8px 0 0'>THE NUMBERS</p>")
+    rule = "<div style='border-top:2px solid #30363d;margin:34px 0 0'></div>"
 
     return (f"<html><head><meta charset='utf-8'>"
             f"<meta name='color-scheme' content='dark'>"
             f"<meta name='supported-color-schemes' content='dark'>"
-            f"<style>{CSS}</style></head>"
+            f"<style>{PDF_CSS if for_pdf else ''}{CSS}</style></head>"
             f"<body style='margin:0;padding:0;background:#0d1117'>"
             f"<div class='wrap' style=\"background:#0d1117;color:#e6edf3;padding:18px;"
             f"font-family:-apple-system,Segoe UI,Arial,sans-serif\">"
             f"{header}{sec_portfolio}{sec_charts}{sec_macro}"
-            f"{rule}{sec_market}"
+            f"{rule}{sec_market}{rule}{all_news_block(news)}"
             f"<p class='small'>Generated automatically. Prices and analyst data from "
             f"Yahoo Finance, sentiment from CNN, calendar from Forex Factory.</p>"
             f"</div></body></html>")
 
 
+def build_pdf(html, images):
+    """Render the report to a PDF with the chart images embedded."""
+    try:
+        from weasyprint import HTML
+    except Exception as e:
+        print(f"weasyprint unavailable, skipping PDF: {e}", file=sys.stderr)
+        return None
+    try:
+        doc = html
+        for cid, data in images.items():
+            b64 = base64.b64encode(data).decode()
+            doc = doc.replace(f"cid:{cid}", f"data:image/png;base64,{b64}")
+        return HTML(string=doc).write_pdf()
+    except Exception as e:
+        print(f"pdf build failed: {e}", file=sys.stderr)
+        return None
+
+
 # ============================== SEND ==============================
 
 
-def send_email(subject, html, images):
+def send_email(subject, html, images, pdf=None, pdf_name="market-report.pdf"):
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = MAIL_FROM
@@ -1365,6 +1562,9 @@ def send_email(subject, html, images):
         part.add_related(data, maintype="image", subtype="png", cid=f"<{cid}>")
     if not SMTP_PASS:
         raise SystemExit("RESEND_API_KEY is not set")
+    if pdf:
+        msg.add_attachment(pdf, maintype="application", subtype="pdf",
+                           filename=pdf_name)
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx) as s:
         s.login(SMTP_USER, SMTP_PASS)
@@ -1472,13 +1672,25 @@ def main():
         open("heatmap.png", "wb").write(heat)
         open("chart.png", "wb").write(chart)
         open("daily.png", "wb").write(daily)
-        print("wrote report.html, heatmap.png, chart.png, daily.png")
+        pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng,
+                              movers, near_ma, brief, ai_used, port, analysts,
+                              earnings, for_pdf=True)
+        pdf = build_pdf(pdf_html, {"heatmap": heat, "chart": chart,
+                                   "daily": daily})
+        if pdf:
+            open("report.pdf", "wb").write(pdf)
+        print("wrote report.html, report.pdf, heatmap.png, chart.png, daily.png")
         print("ai used:", ai_used)
         print("subject:", subject)
         return
 
-    send_email(subject, html, {"heatmap": heat, "chart": chart,
-                               "daily": daily})
+    images = {"heatmap": heat, "chart": chart, "daily": daily}
+    pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
+                          near_ma, brief, ai_used, port, analysts, earnings,
+                          for_pdf=True)
+    pdf = build_pdf(pdf_html, images)
+    stamp = dt.datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+    send_email(subject, html, images, pdf, f"market-report-{stamp}.pdf")
     write_state({"date": today_key, "slot": slot,
                  "summary": brief["summary"],
                  "spx": quotes.get("^GSPC", {}).get("last")})
