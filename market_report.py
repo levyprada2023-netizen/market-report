@@ -599,6 +599,45 @@ def sp500_members():
         return list(UNIVERSE)
 
 
+def multpl_history(url):
+    """Full monthly history with today's reading placed against it.
+
+    Hardcoding a long run average would go stale and could simply be wrong,
+    so the mean, median, peak and percentile are computed from the actual
+    series each run.
+    """
+    try:
+        r = requests.get(url + "/table/by-month", timeout=30,
+                         headers={"User-Agent": UA})
+        r.raise_for_status()
+        rows = re.findall(
+            r"<td>([A-Z][a-z]{2} \d{1,2}, \d{4})</td>\s*<td>\s*&#x2002;\s*([\d.]+)",
+            r.text)
+        if len(rows) < 100:
+            return None
+        vals = [float(v) for _, v in rows]
+        cur = vals[0]
+        peak = max(vals)
+        trough = min(vals)
+        return {
+            "current": cur,
+            "mean": sum(vals) / len(vals),
+            "median": sorted(vals)[len(vals) // 2],
+            "peak": peak,
+            "peak_date": rows[vals.index(peak)][0],
+            "trough": trough,
+            "trough_date": rows[vals.index(trough)][0],
+            "percentile": sum(1 for v in vals if v < cur) / len(vals) * 100,
+            "months": len(vals),
+            "since": rows[-1][0],
+            "vs_mean": (cur / (sum(vals) / len(vals)) - 1) * 100,
+            "vs_peak": (cur / peak - 1) * 100,
+        }
+    except Exception as e:
+        print(f"multpl history failed {url}: {e}", file=sys.stderr)
+        return None
+
+
 def scrape_multpl(url):
     """multpl publishes the current value in a div marked current."""
     try:
@@ -692,6 +731,43 @@ def reddit_buzz(limit=15):
         return []
 
 
+PC_INDEX = ["SPY", "QQQ", "IWM", "DIA"]
+PC_EQUITY = ["NVDA", "AAPL", "TSLA", "AMZN", "META", "MSFT", "AMD", "GOOGL"]
+
+
+def put_call(symbols, expiries=4):
+    """Put to call ratio computed from live option chains.
+
+    CBOE stopped publishing their daily ratios on a free endpoint, so this is
+    built from the chains directly. Index options are dominated by hedging and
+    normally sit above 1.0, while single stock options are speculative and sit
+    well below, so the two are reported separately rather than blended.
+    """
+    pv = cv = poi = coi = 0.0
+    used = []
+    for sym in symbols:
+        try:
+            tk = yf.Ticker(sym)
+            for exp in (tk.options or [])[:expiries]:
+                ch = tk.option_chain(exp)
+                pv += float(ch.puts["volume"].fillna(0).sum())
+                cv += float(ch.calls["volume"].fillna(0).sum())
+                poi += float(ch.puts["openInterest"].fillna(0).sum())
+                coi += float(ch.calls["openInterest"].fillna(0).sum())
+            used.append(sym)
+        except Exception as e:
+            print(f"option chain failed {sym}: {e}", file=sys.stderr)
+    if not cv or not coi:
+        return None
+    return {
+        "volume_pc": pv / cv,
+        "oi_pc": poi / coi,
+        "put_volume": pv,
+        "call_volume": cv,
+        "symbols": used,
+    }
+
+
 def market_health():
     """Breadth and valuation for the market as a whole, not single names."""
     out = {}
@@ -744,8 +820,12 @@ def market_health():
     except Exception as e:
         print(f"health tickers failed: {e}", file=sys.stderr)
 
-    out["cape"] = scrape_multpl(CAPE_URL)
-    out["pe"] = scrape_multpl(SP500_PE_URL)
+    out["pc_index"] = put_call(PC_INDEX)
+    out["pc_equity"] = put_call(PC_EQUITY)
+    out["cape_hist"] = multpl_history(CAPE_URL)
+    out["pe_hist"] = multpl_history(SP500_PE_URL)
+    out["cape"] = (out["cape_hist"] or {}).get("current") or scrape_multpl(CAPE_URL)
+    out["pe"] = (out["pe_hist"] or {}).get("current") or scrape_multpl(SP500_PE_URL)
     return out
 
 
@@ -965,6 +1045,18 @@ Return ONLY a JSON object, no markdown fences, with these keys:
   State your bullish or bearish lean and the reasoning behind it. Acknowledge
   what would change your mind.
 
+"health_analysis": string. 5 to 8 sentences on the market as a whole and
+  where it sits in the cycle. Use the breadth figures, the equal weight versus
+  cap weight spread, the valuation percentiles, the put to call ratios and the
+  risk pricing. Say plainly whether participation is broad or narrow and what
+  that has historically implied. Put the CAPE reading in context using the
+  percentile and peak supplied, and be honest that stretched valuation says a
+  lot about the next decade and almost nothing about the next year. Note any
+  divergence between the tape and the internals. Finish with your read on
+  which part of the cycle this most resembles, and what would change that
+  view. This is the section he uses to think about cycle positioning, so give
+  him something substantive rather than a hedge.
+
 "lean": string, exactly one of "bullish", "leaning bullish", "neutral",
   "leaning bearish", "bearish". Your overall near term read.
 
@@ -1008,8 +1100,8 @@ def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
     blank = {
         "summary": fallback_summary(quotes, fng, movers, cal_today, port),
         "portfolio_analysis": "", "technical_analysis": "",
-        "macro_analysis": "", "lean": "", "lean_reason": "",
-        "news_picks": [],
+        "macro_analysis": "", "health_analysis": "", "lean": "",
+        "lean_reason": "", "news_picks": [],
     }
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
@@ -1175,9 +1267,33 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                f"past quarter {h['rsp_spy_qtr']:+.2f}%. Negative means the "
                "average stock is lagging the megacaps.\n"
                if h.get("rsp_spy_month") is not None else "")
-            + (f"Valuation: Shiller CAPE {h['cape']:.1f}"
-               if h.get("cape") else "")
-            + (f", S&P 500 trailing P/E {h['pe']:.1f}" if h.get("pe") else "")
+            + (f"Breadth reading: {breadth_verdict(h['above50'], h['above200'])}\n"
+               if h.get("above50") is not None else "")
+            + (("Valuation with full history: Shiller CAPE "
+                f"{h['cape_hist']['current']:.1f} versus a long run mean of "
+                f"{h['cape_hist']['mean']:.1f} and median "
+                f"{h['cape_hist']['median']:.1f}; that is "
+                f"{h['cape_hist']['vs_mean']:+.0f}% against the mean and sits "
+                f"in the {h['cape_hist']['percentile']:.0f}th percentile of "
+                f"{h['cape_hist']['months']:,} months since "
+                f"{h['cape_hist']['since']}; the all time peak was "
+                f"{h['cape_hist']['peak']:.1f} in "
+                f"{h['cape_hist']['peak_date']}, so today is "
+                f"{abs(h['cape_hist']['vs_peak']):.0f}% "
+                f"{'below' if h['cape_hist']['vs_peak'] < 0 else 'above'} it")
+               if h.get("cape_hist") else "")
+            + ((f". S&P 500 trailing P/E {h['pe_hist']['current']:.1f} versus "
+                f"mean {h['pe_hist']['mean']:.1f}, "
+                f"{h['pe_hist']['percentile']:.0f}th percentile")
+               if h.get("pe_hist") else "")
+            + ((f".\nPut to call: index options volume "
+                f"{h['pc_index']['volume_pc']:.2f}, open interest "
+                f"{h['pc_index']['oi_pc']:.2f}")
+               if h.get("pc_index") else "")
+            + ((f"; single stock volume {h['pc_equity']['volume_pc']:.2f}. "
+                "Index options run higher because they are hedges, single "
+                "stock options run lower because they are speculation")
+               if h.get("pc_equity") else "")
             + (f".\nRisk pricing: CBOE SKEW {h['^SKEW']:.1f} "
                f"({h['^SKEW_chg']:+.1f}%), VIX {h['^VIX']:.2f} "
                f"({h['^VIX_chg']:+.1f}%), HYG high yield credit "
@@ -1858,8 +1974,44 @@ def gauge_bar(pct, good_high=True):
             f"height:8px;border-radius:5px'></div></div>")
 
 
+def breadth_verdict(above50, above200):
+    """Plain reading of what the two breadth figures mean together."""
+    if above50 >= 70 and above200 >= 70:
+        return ("Broad participation. Most stocks are in an uptrend on both "
+                "horizons, which is the healthiest configuration.")
+    if above50 < 40 and above200 >= 60:
+        return ("Short term pullback inside a longer uptrend. The 50 day "
+                "figure has cracked while the 200 day is intact, which is "
+                "what an ordinary correction looks like.")
+    if above50 >= 60 and above200 < 45:
+        return ("Early recovery. Stocks are bouncing off lows but most have "
+                "not yet repaired the longer trend.")
+    if above50 < 40 and above200 < 40:
+        return ("Broad weakness on both horizons. This configuration shows up "
+                "in genuine downtrends, not routine pullbacks.")
+    if above200 - above50 > 20:
+        return ("The average stock is losing short term momentum while the "
+                "long trend holds. Worth watching rather than acting on.")
+    return ("Mixed. Neither figure is at an extreme, so breadth is not saying "
+            "much either way right now.")
+
+
+def hist_row(label, h, dp=1):
+    """One valuation line with its own history alongside it."""
+    if not h:
+        return ""
+    return (f"<tr><td>{label}</td>"
+            f"<td class='num'><b>{h['current']:,.{dp}f}</b></td>"
+            f"<td class='num'>{h['mean']:,.{dp}f}</td>"
+            f"<td class='num'>{h['median']:,.{dp}f}</td>"
+            f"<td class='num'>{h['peak']:,.{dp}f}</td>"
+            f"<td class='small'>{h['peak_date']}</td>"
+            f"<td class='num {cls(h['percentile'] - 50)}'>"
+            f"{h["percentile"]:.0f}{"st" if h["percentile"]%10==1 and h["percentile"]//10!=1 else "nd" if h["percentile"]%10==2 and h["percentile"]//10!=1 else "rd" if h["percentile"]%10==3 and h["percentile"]//10!=1 else "th"}</td></tr>")
+
+
 def health_block(h):
-    """Market wide breadth and valuation."""
+    """Market wide breadth, valuation and risk pricing, with context."""
     if not h:
         return ""
 
@@ -1874,7 +2026,7 @@ def health_block(h):
             "<p class='small' style='margin:12px 0 2px;color:#e6edf3;"
             f"font-weight:600'>Breadth, all {h['counted']} S&amp;P 500 members</p>"
             + gauge_bar(h["above50"])
-            + f"<p class='small'>{h['above50']:.0f}% trading above their 50 day "
+            + f"<p class='small'>{h['above50']:.0f}% above their 50 day "
               f"average, {h['above200']:.0f}% above their 200 day</p>"
             + "<table>"
             + row("Advancers vs decliners",
@@ -1882,11 +2034,21 @@ def health_block(h):
                   f"ratio {ad:.2f}" if ad else "")
             + row("Median stock move", f"{h['median_move']:+.2f}%",
                   "the typical stock, not the index")
-            + row("New 52 week highs", h["new_highs"], "")
+            + row("New 52 week highs", h["new_highs"],
+                  "expansion is healthy, contraction while the index rises is not")
             + row("New 52 week lows", h["new_lows"], "")
-            + row("Above 50 day average", f"{h['above50']:.0f}%", "")
-            + row("Above 200 day average", f"{h['above200']:.0f}%", "")
-            + "</table>")
+            + row("Above 50 day average", f"{h['above50']:.0f}%",
+                  "short term trend, roughly ten weeks")
+            + row("Above 200 day average", f"{h['above200']:.0f}%",
+                  "long term trend, roughly a year")
+            + "</table>"
+            + "<p class='small'><b>What the two averages mean together.</b> "
+              "The 50 day is the short trend and the 200 day is the long one. "
+              "When most stocks sit above both, the rally is broad. When the "
+              "50 day figure falls hard while the 200 day holds, it is usually "
+              "a pullback inside an uptrend. When both fall below 40 percent, "
+              "the damage is structural rather than cosmetic. "
+              + breadth_verdict(h["above50"], h["above200"]) + "</p>")
 
     lead = ""
     if h.get("rsp_spy_month") is not None:
@@ -1901,15 +2063,49 @@ def health_block(h):
                   "carried by a narrowing group.</p>")
 
     val = ""
-    if h.get("cape") or h.get("pe"):
+    ch, ph = h.get("cape_hist"), h.get("pe_hist")
+    if ch or ph:
+        span = ch or ph
         val = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
-               "font-weight:600'>Market valuation</p><table>"
-               + (row("Shiller CAPE", f"{h['cape']:.1f}",
-                      "10 year inflation adjusted earnings")
-                  if h.get("cape") else "")
-               + (row("S&amp;P 500 P/E", f"{h['pe']:.1f}", "trailing twelve months")
-                  if h.get("pe") else "")
+               "font-weight:600'>Market valuation against its own history</p>"
+               "<table><tr><th>Measure</th><th class='num'>Now</th>"
+               "<th class='num'>Mean</th><th class='num'>Median</th>"
+               "<th class='num'>Peak</th><th>Peak date</th>"
+               "<th class='num'>Percentile</th></tr>"
+               + hist_row("Shiller CAPE", ch)
+               + hist_row("S&amp;P 500 P/E", ph)
                + "</table>")
+        if ch:
+            val += (f"<p class='small'>CAPE uses ten years of inflation "
+                    f"adjusted earnings, which smooths out the cycle. Today's "
+                    f"{ch['current']:.1f} is {ch['vs_mean']:+.0f}% against the "
+                    f"long run mean of {ch['mean']:.1f}, sits in the "
+                    f"{ch['percentile']:.0f}th percentile of "
+                    f"{ch['months']:,} months going back to {ch['since']}, and "
+                    f"is {abs(ch['vs_peak']):.0f}% "
+                    f"{'below' if ch['vs_peak'] < 0 else 'above'} the all time "
+                    f"peak of {ch['peak']:.1f} set in {ch['peak_date']}. "
+                    "High readings have historically meant weaker returns over "
+                    "the following decade, but they are close to useless for "
+                    "timing anything inside a year.</p>")
+
+    pc = ""
+    if h.get("pc_index") or h.get("pc_equity"):
+        i, e = h.get("pc_index"), h.get("pc_equity")
+        pc = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+              "font-weight:600'>Put to call ratios</p><table>"
+              + (row("Index options, volume", f"{i['volume_pc']:.2f}",
+                     "SPY, QQQ, IWM, DIA. Above 1.2 is defensive, below 0.8 "
+                     "is complacent") if i else "")
+              + (row("Index options, open interest", f"{i['oi_pc']:.2f}",
+                     "standing positioning rather than today's flow") if i else "")
+              + (row("Single stock, volume", f"{e['volume_pc']:.2f}",
+                     "large caps. Normally well below the index figure, since "
+                     "these are speculative rather than hedges") if e else "")
+              + "</table><p class='small'>Computed from live option chains "
+                "across the nearest four expiries, since CBOE no longer "
+                "publishes its daily ratios on a free endpoint. Directionally "
+                "sound, not identical to the official CBOE series.</p>")
 
     risk = ""
     if h.get("^SKEW"):
@@ -1919,15 +2115,15 @@ def health_block(h):
                       "above 145 means the options market is paying up for "
                       "crash protection")
                 + row("VIX", f"{h['^VIX']:.2f}",
-                      f"{h['^VIX_chg']:+.1f}% on the day")
+                      f"{h['^VIX_chg']:+.1f}% on the day. Below 15 is calm, "
+                      "above 25 is stressed")
                 + row("High yield credit (HYG)", f"{h['HYG']:.2f}",
                       f"{h['HYG_chg']:+.2f}% on the day, credit usually cracks "
                       "before equities")
                 + "</table>")
 
-    return ("<h2 id='health'>Market health</h2>" + breadth + lead + val + risk
-            + "<p class='small'>Put and call volume ratios are not included, "
-              "as CBOE no longer publishes them on a free endpoint.</p>")
+    return ("<h2 id='health'>Market health</h2>" + breadth + lead + val
+            + pc + risk)
 
 
 def fng_block(f):
@@ -2499,6 +2695,8 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
     sec_market = (idx
                   + "<h2>Sectors, best to worst</h2>"
                   + simple_table(SECTORS, quotes, "Sector", sort=True)
+                  + analysis_box("Market health analysis",
+                                 brief.get("health_analysis"), "#58a6ff")
                   + health_block(health or {})
                   + retail_block(sentiment or {}, buzz or [])
                   + fng_block(fng)
