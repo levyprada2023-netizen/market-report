@@ -754,8 +754,13 @@ Return ONLY a JSON object, no markdown fences, with these keys:
   Do not recommend day trading or short dated options.
 
 "technical_analysis": string. 5 to 8 sentences. Read both attached charts. The
-  first is the intraday 5 minute S&P with VWAP in gold and prior close dashed.
-  The second is the daily S&P with 20, 50 and 200 day averages. Cover the shape
+  first is the intraday 5 minute S&P covering TWO sessions, with VWAP in gold,
+  prior close dashed, and a blue vertical line marking where the current
+  session begins. Everything left of that line and shaded is the PREVIOUS day.
+  The large volume bar immediately left of the line is that day's closing
+  auction, so never describe it as an opening spike. Volume figures for each
+  session are given in the data block; use those numbers, not the bar heights.
+  The second chart is the daily S&P with 20, 50 and 200 day averages. Cover the shape
   of the session, whether price held above or below VWAP and what that says
   about who was in control, where price sits against each daily average, the
   trend structure, whether volume confirmed or contradicted the move, and any
@@ -857,6 +862,45 @@ def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
         return blank, False
 
 
+def intraday_facts(df):
+    """Session volume facts, so the chart never has to be read for numbers.
+
+    The two session chart puts the prior close auction right beside today's
+    open, which is easy to misread as an opening spike. These figures state
+    plainly which session each volume event belongs to.
+    """
+    try:
+        day = df.index.date
+        days = sorted(set(day))
+        if len(days) < 1:
+            return None
+        today = df[[d == days[-1] for d in day]]
+        prior = df[[d == days[0] for d in day]] if len(days) > 1 else None
+
+        out = {
+            "today_date": str(days[-1]),
+            "today_bars": len(today),
+            "today_volume": float(today["Volume"].sum()),
+            "today_open_volume": float(today["Volume"].head(6).sum()),
+            "today_max_bar": float(today["Volume"].max()),
+            "today_max_time": str(today["Volume"].idxmax())[11:16],
+            "today_high": float(today["High"].max()),
+            "today_low": float(today["Low"].min()),
+        }
+        if prior is not None and len(prior):
+            out.update({
+                "prior_date": str(days[0]),
+                "prior_volume": float(prior["Volume"].sum()),
+                "prior_close_auction": float(prior["Volume"].tail(2).sum()),
+                "prior_max_bar": float(prior["Volume"].max()),
+                "prior_max_time": str(prior["Volume"].idxmax())[11:16],
+            })
+        return out
+    except Exception as e:
+        print(f"intraday facts failed: {e}", file=sys.stderr)
+        return None
+
+
 def index_technicals(symbol="^GSPC"):
     """Actual distance from the key averages, so nothing is eyeballed."""
     try:
@@ -879,7 +923,7 @@ def index_technicals(symbol="^GSPC"):
 def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     news, port, analysts, earnings, prev_state, tech=None,
                     my_news=None, fundamentals=None, earn_hist=None,
-                    shorted=None):
+                    shorted=None, intraday=None):
     """Compact text block handed to the model."""
     def line(names):
         return "; ".join(
@@ -901,6 +945,32 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             f"50d avg {tech['sma50']:,.2f} ({tech['gap50']:+.2f}%); "
             f"200d avg {tech['sma200']:,.2f} ({tech['gap200']:+.2f}%); "
             f"{tech['from_high']:+.2f}% from the 52 week closing high")
+    if intraday:
+        i = intraday
+        block = [
+            "INTRADAY SESSION FACTS. The 5 minute chart shows TWO sessions "
+            "side by side, separated by a blue vertical line and with the "
+            "older one shaded. The tall volume bar just LEFT of that line is "
+            f"the closing auction of {i.get('prior_date', 'the prior session')}, "
+            "NOT an opening spike on the current session. Use these figures "
+            "rather than reading bar heights off the picture.",
+            f"Current session {i['today_date']}: total volume "
+            f"{i['today_volume']:,.0f}; first 30 minutes {i['today_open_volume']:,.0f}; "
+            f"largest single bar {i['today_max_bar']:,.0f} at {i['today_max_time']}; "
+            f"range {i['today_low']:,.2f} to {i['today_high']:,.2f}",
+        ]
+        if i.get("prior_date"):
+            block.append(
+                f"Prior session {i['prior_date']}: total volume "
+                f"{i['prior_volume']:,.0f}; closing auction "
+                f"{i['prior_close_auction']:,.0f}; largest single bar "
+                f"{i['prior_max_bar']:,.0f} at {i['prior_max_time']}")
+            if i["today_volume"] and i["prior_volume"]:
+                block.append(
+                    "Current session volume is "
+                    f"{i['today_volume'] / i['prior_volume'] * 100:.0f}% of the "
+                    "prior session's total")
+        parts.append("\n".join(block))
     if fng:
         parts.append(f"CNN Fear and Greed: {fng['score']:.0f} ({fng['rating']}), "
                      f"week ago {fng['week']:.0f}, month ago {fng['month']:.0f}")
@@ -1307,7 +1377,14 @@ def get_intraday(symbol, interval=INTRADAY_INTERVAL, days=INTRADAY_DAYS):
 
 
 def build_chart(df, prev_close=None):
-    """Intraday candles with VWAP and a prior close reference line."""
+    """Intraday candles with VWAP and a prior close reference line.
+
+    Two sessions are shown so the morning has context, but they are plotted
+    as one continuous series. Without a hard visual break the previous
+    session's closing auction volume sits right next to today's open and
+    reads as an opening spike, so the prior session is shaded and both
+    sessions are labelled.
+    """
     style = mpf.make_mpf_style(
         base_mpf_style="nightclouds",
         rc={"font.size": 9},
@@ -1315,7 +1392,6 @@ def build_chart(df, prev_close=None):
             up="#3fb950", down="#f85149", edge="inherit",
             wick="inherit", volume="in"))
 
-    # session VWAP, reset each trading day
     tp = (df["High"] + df["Low"] + df["Close"]) / 3
     day = df.index.date
     cum_pv = (tp * df["Volume"]).groupby(day).cumsum()
@@ -1329,23 +1405,39 @@ def build_chart(df, prev_close=None):
         hlines = dict(hlines=[float(prev_close)], colors=["#c9d1d9"],
                       linestyle="--", linewidths=1.2)
 
-    # vertical divider at the first bar of the most recent session
     days_seen = sorted(set(day))
-    vlines = None
-    if len(days_seen) > 1:
-        first_today = df.index[[d == days_seen[-1] for d in day]][0]
-        vlines = dict(vlines=[first_today], colors=["#484f58"],
-                      linestyle="-", linewidths=1.0)
-
     label = f"S&P 500 intraday, {INTRADAY_INTERVAL} candles"
     sub = "gold line is VWAP"
     if prev_close:
         sub += ", dashed line is prior close"
 
-    fig, _ = mpf.plot(df, type="candle", style=style, volume=True,
-                      addplot=adds, hlines=hlines, vlines=vlines,
-                      figsize=(11, 6.2), returnfig=True,
-                      tight_layout=True)
+    fig, axes = mpf.plot(df, type="candle", style=style, volume=True,
+                         addplot=adds, hlines=hlines,
+                         figsize=(11, 6.4), returnfig=True,
+                         tight_layout=True)
+
+    # shade and label each session so the boundary cannot be misread
+    if len(days_seen) > 1:
+        positions = list(range(len(df)))
+        split = next(i for i, d in enumerate(day) if d == days_seen[-1])
+        for ax in axes[:2] + axes[2:3]:
+            try:
+                ax.axvspan(positions[0] - 0.5, split - 0.5,
+                           color="#ffffff", alpha=0.045, zorder=0)
+                ax.axvline(split - 0.5, color="#79c0ff", linewidth=1.6,
+                           linestyle="-", alpha=0.9, zorder=3)
+            except Exception:
+                pass
+        price_ax = axes[0]
+        top = price_ax.get_ylim()[1]
+        price_ax.text(split / 2, top, f"PRIOR SESSION {days_seen[0]}",
+                      color="#8b949e", fontsize=8, ha="center", va="top",
+                      fontweight="bold")
+        price_ax.text((split + len(df)) / 2, top, f"TODAY {days_seen[-1]}",
+                      color="#79c0ff", fontsize=8, ha="center", va="top",
+                      fontweight="bold")
+        sub += ". Shaded area and blue line separate the two sessions"
+
     fig.suptitle(label, color="#e6edf3", fontsize=13,
                  fontweight="bold", y=1.02)
     fig.text(0.5, 0.975, sub, color="#8b949e", fontsize=9, ha="center")
@@ -1355,6 +1447,7 @@ def build_chart(df, prev_close=None):
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     return buf.getvalue()
+
 
 def build_daily_chart(df, bars=140):
     """Daily candles with 20 / 50 / 200 SMA and volume, for trend context."""
@@ -2150,8 +2243,9 @@ def main():
         key=lambda x: -x[1])
 
     heat = build_heatmap(sector_items, mega_items)
-    chart = build_chart(get_intraday(CHART_SYMBOL),
-                        quotes.get(CHART_SYMBOL, {}).get("prev"))
+    intraday_df = get_intraday(CHART_SYMBOL)
+    intraday = intraday_facts(intraday_df)
+    chart = build_chart(intraday_df, quotes.get(CHART_SYMBOL, {}).get("prev"))
     daily = build_daily_chart(get_history(CHART_SYMBOL, period="2y"))
 
     news = get_news(limit=NEWS_POOL)
@@ -2182,7 +2276,7 @@ def main():
     payload = summary_payload(quotes, fng, movers, near_ma, cal_today,
                               cal_ahead, news, port, analysts, earnings,
                               prev_today, tech, my_news, fundamentals,
-                              earn_hist, shorted)
+                              earn_hist, shorted, intraday)
     brief, ai_used = ai_brief(payload, [chart, daily], quotes, fng, movers,
                               cal_today, port)
 
