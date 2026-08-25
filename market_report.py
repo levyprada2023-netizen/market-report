@@ -39,7 +39,7 @@ SMTP_USER = "resend"
 SMTP_PASS = os.environ.get("RESEND_API_KEY", "")
 
 MAIL_FROM = "Market Report <onboarding@resend.dev>"
-MAIL_TO = "kenneth.soong@gmail.com"            # where the report goes
+MAIL_TO = "levyprada2023@gmail.com"            # where the report goes
 
 LOCAL_TZ = ZoneInfo("America/Edmonton")
 MARKET_TZ = ZoneInfo("America/New_York")
