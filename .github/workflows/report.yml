@@ -2,14 +2,11 @@ name: market report
 
 on:
   schedule:
-    # Weekday reports. Six triggers cover US daylight and standard time.
-    # The script sends only when a report is actually due.
-    - cron: '0 14 * * 1-5'
-    - cron: '30 16 * * 1-5'
-    - cron: '0 19 * * 1-5'
-    - cron: '0 15 * * 1-5'
-    - cron: '30 17 * * 1-5'
-    - cron: '0 20 * * 1-5'
+    # One report per trading day, 10 minutes after the 4pm ET close.
+    # Two triggers cover US daylight and standard time. The script checks
+    # New York time and exits silently unless a report is actually due.
+    - cron: '10 20 * * 1-5'   # 16:10 ET during US daylight time
+    - cron: '10 21 * * 1-5'   # 16:10 ET during US standard time
     # Weekend review, Sunday 9am Mountain
     - cron: '0 15 * * 0'
   workflow_dispatch:
@@ -40,7 +37,7 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           HOLDINGS_CSV_URL: ${{ secrets.HOLDINGS_CSV_URL }}
-          
+
       - name: remember this report
         run: |
           git config user.name "market report"
