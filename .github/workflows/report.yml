@@ -22,7 +22,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install yfinance mplfinance feedparser pandas matplotlib requests
+      - name: system libraries for PDF rendering
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
+
+      - run: pip install yfinance mplfinance feedparser pandas matplotlib requests weasyprint
 
       - name: run report
         run: |
