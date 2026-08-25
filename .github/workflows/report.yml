@@ -2,13 +2,20 @@ name: market report
 
 on:
   schedule:
+    # Weekday reports. Six triggers cover US daylight and standard time.
+    # The script sends only when a report is actually due.
     - cron: '0 14 * * 1-5'
     - cron: '30 16 * * 1-5'
     - cron: '0 19 * * 1-5'
     - cron: '0 15 * * 1-5'
     - cron: '30 17 * * 1-5'
     - cron: '0 20 * * 1-5'
+    # Weekend review, Sunday 9am Mountain
+    - cron: '0 15 * * 0'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   report:
@@ -19,7 +26,24 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install yfinance mplfinance feedparser pandas matplotlib requests
+
       - name: run report
-        run: python market_report.py ${{ github.event_name == 'workflow_dispatch' && '--force' || '' }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python market_report.py --force
+          elif [ "$(date -u +%u)" = "7" ]; then
+            python market_report.py --weekly
+          else
+            python market_report.py
+          fi
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: remember this report
+        run: |
+          git config user.name "market report"
+          git config user.email "actions@github.com"
+          git add state.json || true
+          git diff --staged --quiet || git commit -m "state $(date -u +%F-%H%M)"
+          git push || true
