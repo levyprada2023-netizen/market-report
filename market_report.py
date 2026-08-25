@@ -125,7 +125,7 @@ NFLX ORCL CRM ADBE INTC QCOM TXN AMAT LRCX KLAC ASML ARM PLTR SMCI DELL
 COIN MSTR HOOD XYZ PYPL SHOP UBER ABNB DASH SPOT NOW SNOW CRWD PANW ZS
 DDOG NET MDB TEAM WDAY INTU IBM CSCO ACN GE CAT DE HON RTX LMT BA
 UNH JNJ PFE MRK ABBV TMO ABT DHR ISRG VRTX REGN AMGN GILD BMY CVS
-BAC WFC GS MS C SCHW BLK AXP V MA PGR CB SPGI ICE
+BAC WFC GS MS C SCHW BLK AXP V MA PGR CB SPGI ICE MRNA
 CVX COP SLB EOG PSX MPC OXY KMI WMB
 PG KO PEP PM MO MDLZ CL KMB GIS SYY KR
 HD LOW TGT TJX NKE SBUX MCD CMG BKNG MAR RCL
@@ -788,26 +788,29 @@ def build_daily_chart(df, bars=140):
 
 
 CSS = """
-body{background:#0d1117;color:#e6edf3;font-family:-apple-system,Segoe UI,Arial,sans-serif;
-     margin:0;padding:18px;}
-h2{font-size:16px;margin:26px 0 8px;color:#e6edf3;border-bottom:1px solid #30363d;padding-bottom:6px;}
-table{border-collapse:collapse;width:100%;font-size:14px;}
-td,th{padding:7px 8px;text-align:left;border-bottom:1px solid #21262d;}
-th{color:#8b949e;font-weight:600;font-size:12px;text-transform:uppercase;}
+.wrap{background:#0d1117;color:#e6edf3;font-family:-apple-system,Segoe UI,Arial,sans-serif;
+     padding:18px;}
+.wrap h2{font-size:16px;margin:26px 0 8px;color:#e6edf3;border-bottom:1px solid #30363d;
+     padding-bottom:6px;}
+.wrap table{border-collapse:collapse;width:100%;font-size:14px;color:#e6edf3;}
+.wrap td,.wrap th{padding:7px 8px;text-align:left;border-bottom:1px solid #21262d;
+     color:#e6edf3;}
+.wrap th{color:#8b949e;font-weight:600;font-size:12px;text-transform:uppercase;}
+.wrap p{color:#e6edf3;}
 .num{text-align:right;font-variant-numeric:tabular-nums;}
-.up{color:#3fb950;font-weight:600;}
-.dn{color:#f85149;font-weight:600;}
-.flat{color:#8b949e;}
-img{width:100%;border-radius:8px;margin-top:6px;}
-a{color:#79c0ff;text-decoration:none;}
-.small{color:#8b949e;font-size:12px;}
-.hdr{font-size:20px;font-weight:700;}
-.hi{color:#f0b429;font-size:11px;font-weight:600;}
-.lede{background:#161b22;border-left:3px solid #58a6ff;border-radius:6px;
+.up{color:#3fb950 !important;font-weight:600;}
+.dn{color:#f85149 !important;font-weight:600;}
+.flat{color:#8b949e !important;}
+.wrap img{width:100%;border-radius:8px;margin-top:6px;}
+.wrap a{color:#79c0ff !important;text-decoration:none;}
+.small{color:#8b949e !important;font-size:12px;}
+.hdr{font-size:20px;font-weight:700;color:#e6edf3;}
+.hi{color:#f0b429 !important;font-size:11px;font-weight:600;}
+.lede{background:#161b22;color:#e6edf3;border-left:3px solid #58a6ff;border-radius:6px;
       padding:14px 16px;margin:14px 0 6px;font-size:15px;line-height:1.55;}
-.think{background:#161b22;border-left:3px solid #f0b429;border-radius:6px;
+.think{background:#161b22;color:#e6edf3;border-left:3px solid #f0b429;border-radius:6px;
       padding:14px 16px;margin:6px 0;font-size:14px;line-height:1.55;}
-details{margin-top:8px;} summary{cursor:pointer;}
+details{margin-top:8px;} summary{cursor:pointer;color:#8b949e;}
 """
 
 
@@ -1036,15 +1039,21 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                near_ma, brief, ai_used, port, analysts, earnings):
     now = dt.datetime.now(LOCAL_TZ)
 
-    lede = f"<div class='lede'>{brief['summary']}</div>"
+    lede = ("<div class='lede' style=\"background:#161b22;color:#e6edf3;"
+            "border-left:3px solid #58a6ff;border-radius:6px;padding:14px 16px;"
+            "margin:14px 0 6px;font-size:15px;line-height:1.55\">"
+            f"{brief['summary']}</div>")
     if brief.get("chart_read"):
-        chart_read = (f"<p class='small' style='font-size:14px;margin:8px 0 0'>"
-                      f"{brief['chart_read']}</p>")
+        chart_read = ("<p class='small' style=\"font-size:14px;margin:8px 0 0;"
+                      f"color:#8b949e\">{brief['chart_read']}</p>")
     else:
         chart_read = ""
     if brief.get("considerations"):
         think = ("<h2>Things to think about</h2>"
-                 f"<div class='think'>{brief['considerations']}</div>"
+                 "<div class='think' style=\"background:#161b22;color:#e6edf3;"
+                 "border-left:3px solid #f0b429;border-radius:6px;padding:14px 16px;"
+                 "margin:6px 0;font-size:14px;line-height:1.55\">"
+                 f"{brief['considerations']}</div>"
                  "<p class='small'>Written by Claude as observations, not advice. "
                  "It has no knowledge of your plan, your tax position or your "
                  "timeline.</p>")
@@ -1080,7 +1089,13 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
     econ = ("<h2>US economic data today</h2>" + cal_table(cal_today)
             + "<h2>Coming up this week</h2>" + cal_table(cal_ahead, show_day=True))
 
-    return (f"<html><head><meta charset='utf-8'><style>{CSS}</style></head><body>"
+    return (f"<html><head><meta charset='utf-8'>"
+            f"<meta name='color-scheme' content='dark'>"
+            f"<meta name='supported-color-schemes' content='dark'>"
+            f"<style>{CSS}</style></head>"
+            f"<body style='margin:0;padding:0;background:#0d1117'>"
+            f"<div class='wrap' style=\"background:#0d1117;color:#e6edf3;padding:18px;"
+            f"font-family:-apple-system,Segoe UI,Arial,sans-serif\">"
             f"{header}"
             f"{portfolio_block(port, brief.get('portfolio_note'))}"
             f"{think}"
@@ -1091,7 +1106,7 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
             f"{crypto}{comm}{glob}{econ}"
             f"<p class='small'>Generated automatically. Prices and analyst data from "
             f"Yahoo Finance, sentiment from CNN, calendar from Forex Factory.</p>"
-            f"</body></html>")
+            f"</div></body></html>")
 
 
 # ============================== SEND ==============================
