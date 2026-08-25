@@ -39,7 +39,8 @@ jobs:
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
+          HOLDINGS_CSV_URL: ${{ secrets.HOLDINGS_CSV_URL }}
+          
       - name: remember this report
         run: |
           git config user.name "market report"
