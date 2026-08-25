@@ -42,7 +42,7 @@ SMTP_USER = "resend"
 SMTP_PASS = os.environ.get("RESEND_API_KEY", "")
 
 MAIL_FROM = "Market Report <onboarding@resend.dev>"
-MAIL_TO = "levyprada2023@gmail.com"            # where the report goes
+MAIL_TO = os.environ.get("MAIL_TO", "levyprada2023@gmail.com")
 
 LOCAL_TZ = ZoneInfo("America/Edmonton")
 MARKET_TZ = ZoneInfo("America/New_York")
@@ -125,7 +125,7 @@ NFLX ORCL CRM ADBE INTC QCOM TXN AMAT LRCX KLAC ASML ARM PLTR SMCI DELL
 COIN MSTR HOOD XYZ PYPL SHOP UBER ABNB DASH SPOT NOW SNOW CRWD PANW ZS
 DDOG NET MDB TEAM WDAY INTU IBM CSCO ACN GE CAT DE HON RTX LMT BA
 UNH JNJ PFE MRK ABBV TMO ABT DHR ISRG VRTX REGN AMGN GILD BMY CVS
-BAC WFC GS MS C SCHW BLK AXP V MA PGR CB SPGI ICE MRNA
+BAC WFC GS MS C SCHW BLK AXP V MA PGR CB SPGI ICE
 CVX COP SLB EOG PSX MPC OXY KMI WMB
 PG KO PEP PM MO MDLZ CL KMB GIS SYY KR
 HD LOW TGT TJX NKE SBUX MCD CMG BKNG MAR RCL
@@ -408,6 +408,15 @@ AI_SCHEMA = """Return ONLY a JSON object, no markdown fences, with these keys:
   and questions rather than instructions. Never say buy, sell, trim or add.
   Never predict a price. Acknowledge uncertainty where it exists.
 
+NUMBERS RULE, this matters more than anything else above. Every number you
+write must appear verbatim in the MARKET DATA block. Do not estimate a level
+from the chart images, do not convert a percentage into a level, do not recall
+a figure from memory, and do not describe anything as elevated, cheap, extended
+or historically high unless the data block gives you the comparison. The charts
+are for reading shape and direction only, never for reading values off an axis.
+If you want to cite a number you have not been given, leave it out and describe
+the direction instead.
+
 Do not use hyphens as punctuation anywhere in your output."""
 
 
@@ -456,13 +465,32 @@ def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
         return blank, False
 
 
+def index_technicals(symbol="^GSPC"):
+    """Actual distance from the key averages, so nothing is eyeballed."""
+    try:
+        df = get_history(symbol, period="2y")
+        c = df["Close"]
+        px = float(c.iloc[-1])
+        out = {"price": px}
+        for n in (20, 50, 200):
+            avg = float(c.rolling(n).mean().iloc[-1])
+            out[f"sma{n}"] = avg
+            out[f"gap{n}"] = (px / avg - 1) * 100
+        hi = float(c.rolling(252).max().iloc[-1])
+        out["from_high"] = (px / hi - 1) * 100
+        return out
+    except Exception as e:
+        print(f"index technicals failed: {e}", file=sys.stderr)
+        return None
+
+
 def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
-                    news, port, analysts, earnings, prev_state):
+                    news, port, analysts, earnings, prev_state, tech=None):
     """Compact text block handed to the model."""
     def line(names):
         return "; ".join(
-            f"{lab} {quotes[s]['pct']:+.2f}%" for s, lab in names.items()
-            if s in quotes)
+            f"{lab} at {quotes[s]['last']:,.2f} ({quotes[s]['pct']:+.2f}%)"
+            for s, lab in names.items() if s in quotes)
 
     parts = [
         f"US indices: {line(INDEXES)}",
@@ -471,6 +499,13 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
         f"Commodities and dollar: {line(COMMODITIES)}",
         f"Global: {line(GLOBAL)}",
     ]
+    if tech:
+        parts.append(
+            f"S&P 500 technicals: price {tech['price']:,.2f}; "
+            f"20d avg {tech['sma20']:,.2f} ({tech['gap20']:+.2f}%); "
+            f"50d avg {tech['sma50']:,.2f} ({tech['gap50']:+.2f}%); "
+            f"200d avg {tech['sma200']:,.2f} ({tech['gap200']:+.2f}%); "
+            f"{tech['from_high']:+.2f}% from the 52 week closing high")
     if fng:
         parts.append(f"CNN Fear and Greed: {fng['score']:.0f} ({fng['rating']}), "
                      f"week ago {fng['week']:.0f}, month ago {fng['month']:.0f}")
@@ -1020,12 +1055,35 @@ def earnings_block(earnings):
             + rows + "</table>")
 
 
+def match_link(title, news):
+    """Find the original article URL for a title the model handed back."""
+    def norm(t):
+        return re.sub(r"[^a-z0-9]", "", (t or "").lower())
+
+    want = norm(title)
+    if not want:
+        return None
+    for n in news:                       # exact match after normalising
+        if norm(n["title"]) == want:
+            return n["link"]
+    for n in news:                       # model trimmed or extended it
+        got = norm(n["title"])
+        if got and (got.startswith(want[:40]) or want.startswith(got[:40])):
+            return n["link"]
+    return None
+
+
 def news_block(picks, news):
     if picks:
-        rows = "".join(
-            f"<tr><td><b>{p.get('title','')}</b>"
-            f"<div class='small' style='margin-top:3px'>{p.get('why','')}</div></td></tr>"
-            for p in picks)
+        rows = ""
+        for p in picks:
+            title = p.get("title", "")
+            link = match_link(title, news)
+            head = (f"<a href='{link}' style='color:#79c0ff;text-decoration:none'>"
+                    f"<b>{title}</b></a>") if link else f"<b>{title}</b>"
+            rows += (f"<tr><td>{head}"
+                     f"<div class='small' style='margin-top:3px'>"
+                     f"{p.get('why','')}</div></td></tr>")
         return ("<h2>What actually matters today</h2><table>" + rows + "</table>"
                 "<details><summary class='small'>All headlines</summary><table>"
                 + "".join(f"<tr><td><a href='{n['link']}'>{n['title']}</a></td></tr>"
@@ -1206,9 +1264,10 @@ def main():
     today_key = dt.datetime.now(MARKET_TZ).date().isoformat()
     prev_today = prev if prev.get("date") == today_key else {}
 
+    tech = index_technicals(CHART_SYMBOL)
     payload = summary_payload(quotes, fng, movers, near_ma, cal_today,
                               cal_ahead, news, port, analysts, earnings,
-                              prev_today)
+                              prev_today, tech)
     brief, ai_used = ai_brief(payload, [chart, daily], quotes, fng, movers,
                               cal_today, port)
 
