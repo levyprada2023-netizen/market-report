@@ -519,14 +519,102 @@ def get_fear_greed():
         return None
 
 
+GOOGLE_NEWS_Q = ("https://news.google.com/rss/search?q=%22{q}%22+when:1d"
+                 "&hl=en-US&gl=US&ceid=US:en")
+
+# Stop words stripped from a release title before searching for coverage
+CAL_NOISE = re.compile(r"\b(m/m|q/q|y/y|prelim|final|revised|index|rate|"
+                       r"speaks|data|report)\b", re.I)
+
+
+def article_body(url, limit=2600):
+    """Plain text of an article, empty string if the publisher blocks us."""
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": UA},
+                         allow_redirects=True)
+        if r.status_code != 200:
+            return ""
+        paras = re.findall(r"<p[^>]*>(.*?)</p>", r.text, re.S)
+        txt = " ".join(re.sub(r"<[^>]+>", "", p) for p in paras)
+        txt = re.sub(r"&[a-z]+;|&#\d+;", " ", txt)
+        return re.sub(r"\s+", " ", txt).strip()[:limit]
+    except Exception:
+        return ""
+
+
+def verify_releases(pending, max_events=4, per_event=4):
+    """Chase down results for releases the calendar feed has not filled in.
+
+    The feed is often slow to publish an actual value, so a release can be
+    out and reported everywhere while the feed still shows nothing. This
+    searches the last day's coverage for each such event. Wire headlines
+    usually carry the figure directly, and article bodies are pulled where
+    the publisher allows it. Everything is handed to the model as reported
+    coverage, never as a confirmed number.
+    """
+    found = []
+    for ev in pending[:max_events]:
+        title = re.sub(r"\s+", " ", CAL_NOISE.sub("", ev["title"])).strip()
+        if len(title) < 4:
+            continue
+
+        queries = [title]
+        short = re.sub(r"^(CB|ISM|UoM|BoC|ECB|Fed)\s+", "", title).strip()
+        if short and short != title:
+            queries.append(short)
+
+        items, seen = [], set()
+        for q in queries:
+            try:
+                url = GOOGLE_NEWS_Q.format(q=requests.utils.quote(q))
+                feed = feedparser.parse(
+                    requests.get(url, timeout=25,
+                                 headers={"User-Agent": UA}).content)
+            except Exception as e:
+                print(f"release search failed {q}: {e}", file=sys.stderr)
+                continue
+
+            for entry in feed.entries[:8]:
+                head = (entry.get("title") or "").strip()
+                key = re.sub(r"[^a-z0-9]", "", head.lower())[:50]
+                if not head or key in seen:
+                    continue
+                seen.add(key)
+                # a headline carrying a figure is usually the whole answer
+                has_number = bool(re.search(r"\d+\.?\d*", head))
+                body = article_body(entry.get("link", ""))
+                if has_number or re.search(r"\d+\.\d", body or ""):
+                    items.append({"headline": head, "text": body[:1400]})
+                if len(items) >= per_event:
+                    break
+            if len(items) >= per_event:
+                break
+
+        if items:
+            found.append({"event": ev, "coverage": items})
+    return found
+
+
 def get_calendar():
     """US economic events. Returns (today, rest_of_week)."""
-    try:
-        r = requests.get(CALENDAR_URL, timeout=20,
-                         headers={"User-Agent": "Mozilla/5.0"})
-        data = r.json()
-    except Exception as e:
-        print(f"calendar failed: {e}", file=sys.stderr)
+    # This feed rate limits, and a 429 returns an HTML error page rather than
+    # JSON, so validate the body and back off rather than losing the calendar.
+    data = None
+    for attempt in range(4):
+        try:
+            r = requests.get(CALENDAR_URL, timeout=25,
+                             headers={"User-Agent": UA})
+            body = r.text.strip()
+            if r.status_code == 200 and body.startswith("["):
+                data = r.json()
+                break
+            print(f"calendar attempt {attempt + 1}: http {r.status_code}",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"calendar attempt {attempt + 1} failed: {e}", file=sys.stderr)
+        time.sleep(3 * (attempt + 1))
+    if data is None:
+        print("calendar unavailable after retries", file=sys.stderr)
         return [], []
 
     now = dt.datetime.now(LOCAL_TZ)
@@ -975,122 +1063,110 @@ def fallback_summary(quotes, fng, movers, cal_today, port):
             return "down"
         return "roughly flat"
 
-    bits = [f"The S&P 500 is {word(p('SPY'))} {abs(p('SPY')):.2f} percent, "
-            f"the Nasdaq 100 {word(p('QQQ'))} {abs(p('QQQ')):.2f} percent and "
-            f"the Dow {word(p('DIA'))} {abs(p('DIA')):.2f} percent."]
-    bits.append(f"Gold is {word(p('GC=F'))} {abs(p('GC=F')):.2f} percent and "
-                f"Bitcoin {word(p('BTC-USD'))} {abs(p('BTC-USD')):.2f} percent.")
-    if fng:
-        bits.append(f"CNN Fear and Greed sits at {fng['score']:.0f}, {fng['rating'].lower()}.")
+    bits = [f"Shares finished the day {word(p('SPY'))}. The S&P 500, which "
+            f"tracks 500 big US companies, moved {p('SPY'):+.2f} percent, and "
+            f"the tech heavy Nasdaq {p('QQQ'):+.2f} percent."]
+    if abs(p("GC=F")) > 0.5 or abs(p("BTC-USD")) > 1.5:
+        bits.append(f"Gold moved {p('GC=F'):+.2f} percent and Bitcoin "
+                    f"{p('BTC-USD'):+.2f} percent.")
     if port:
-        bits.append(f"The portfolio is {word(port['day_pct'])} "
-                    f"{abs(port['day_pct']):.2f} percent, "
-                    f"{port['day_pl']:+,.0f} on the day.")
-    if movers:
-        names = ", ".join(f"{m['sym']} {m['pct']:+.1f}%" for m in movers[:3])
-        bits.append(f"Biggest movers: {names}.")
+        bits.append(f"Your account is {port['day_pl']:+,.0f} on the day, "
+                    f"{port['day_pct']:+.2f} percent.")
     if cal_today:
         n = len(cal_today)
-        bits.append(f"{n} US data release{'s' if n != 1 else ''} on today's calendar.")
+        bits.append(f"There {'is' if n == 1 else 'are'} {n} economic "
+                    f"report{'s' if n != 1 else ''} on the calendar today.")
     return " ".join(bits)
 
 
-AI_SCHEMA = """You are writing a market report for a 46 year old investor with a
-20 year time horizon. He is financially literate, understands options, leverage
-and technical analysis, and does not need concepts explained. He wants your
-actual read, not hedged neutrality. Write for someone who can handle a direct
-opinion and will make his own decision.
+AI_SCHEMA = """You are writing a daily market report for a couple who invest
+together with a 20 year horizon. One of them follows markets closely, the
+other does not. Write so the one who does not can read the whole thing in a
+few minutes and understand it completely.
+
+HOW TO WRITE. This matters as much as what you say.
+- Plain English at a high school reading level. Short sentences.
+- Explain any term the moment you use it, in a few words: "the VIX, which
+  measures how much fear is priced into the market, rose to 15.8".
+- No jargon without a plain translation. Never write breadth, multiple
+  compression, risk on, rotation, hawkish, or dovish without saying what it
+  means in ordinary words.
+- Say what a number means, not just what it is. "58 percent of stocks are
+  above their 50 day average, so a bit more than half are doing well" beats
+  "breadth is 58 percent".
+- Be brief. Respect the word limits below. Cut every sentence that does not
+  tell him something he can use.
+- No filler openers. Start with the point.
 
 Return ONLY a JSON object, no markdown fences, with these keys:
 
-"summary": string. 4 to 6 sentences. The whole day in plain English, written so
-  his wife could read it over coffee and understand where things stand. What US
-  equities did and why, bonds, gold and Bitcoin, anything notable overseas, the
-  sentiment reading, the biggest single stock story, what is coming. Specific
-  numbers. Calm and factual. This one is a briefing, not analysis.
+"summary": string. 3 to 4 short sentences, under 90 words. What happened
+  today and why it matters. Cover stocks, then anything unusual in gold,
+  bitcoin or overseas, then what is coming next. Specific numbers, plainly
+  explained. This is the part read over coffee.
 
-"portfolio_analysis": string, or "" if no portfolio data was supplied. 5 to 8
-  sentences. Assess the health of the book against a 20 year horizon. Cover:
-  what drove today in dollars, concentration and whether any position has grown
-  into an outsized share, sector tilt, which positions are working and which
-  are dragging, how the holdings sit against analyst targets, and any earnings
-  coming that matter to him specifically. Then give your actual view on what a
-  20 year holder might do from here, including doing nothing, which is often
-  the right answer. Be concrete. Name tickers. If you think something looks
-  stretched or something looks like an opportunity, say so plainly and say why.
-  Do not recommend day trading or short dated options.
+"portfolio_analysis": string, or "" if no portfolio data. 4 to 6 short
+  sentences, under 130 words. How much the account made or lost today in
+  dollars, which one or two holdings caused it, and anything that needs
+  attention such as earnings coming up or a position that has grown very
+  large. End with one plain sentence on what a long term holder might do,
+  including doing nothing, which is often right. Name tickers.
 
-"technical_analysis": string. 5 to 8 sentences. Read both attached charts. The
-  first is the intraday 5 minute S&P covering TWO sessions, with VWAP in gold,
-  prior close dashed, and a blue vertical line marking where the current
-  session begins. Everything left of that line and shaded is the PREVIOUS day.
-  The large volume bar immediately left of the line is that day's closing
-  auction, so never describe it as an opening spike. Volume figures for each
-  session are given in the data block; use those numbers, not the bar heights.
-  The second chart is the daily S&P with 20, 50 and 200 day averages. Cover the shape
-  of the session, whether price held above or below VWAP and what that says
-  about who was in control, where price sits against each daily average, the
-  trend structure, whether volume confirmed or contradicted the move, and any
-  divergence worth noting. Then give your forecast: what setup is in play, what
-  would confirm it and what would invalidate it. Frame it as scenarios with
-  your lean, not a certainty. Reference actual levels from the data block.
+"technical_analysis": string. 3 to 5 short sentences, under 110 words. What
+  the charts show, described the way you would to someone who has never read
+  a chart. Whether the price is trending up or down, whether it is above or
+  below its long term average and what that means, and whether trading volume
+  supported the move. Then one sentence on what to watch next and what would
+  change the picture.
 
-"macro_analysis": string. 6 to 10 sentences. This is the deep one. Work through
-  the economic data released today, what is coming this week, and the headlines
-  supplied. Go past summary into implication: what the data says about growth,
-  inflation and the rate path, how the bond market is positioned versus the
-  equity market, what the sector rotation reveals about what money is doing,
-  what the sentiment reading means in context, and where the risks sit. Draw
-  connections between separate data points that a casual reader would miss.
-  State your bullish or bearish lean and the reasoning behind it. Acknowledge
-  what would change your mind.
+"macro_analysis": string. 5 to 7 short sentences, under 160 words. The
+  economy and the news. What today's data means for jobs, prices and interest
+  rates. Explain each figure in ordinary words. Connect two things a casual
+  reader would miss. Say whether the overall picture leans positive or
+  negative and why. Finish with what would change your view.
 
-"health_analysis": string. 5 to 8 sentences on the market as a whole and
-  where it sits in the cycle. Use the breadth figures, the equal weight versus
-  cap weight spread, the valuation percentiles, the put to call ratios and the
-  risk pricing. Say plainly whether participation is broad or narrow and what
-  that has historically implied. Put the CAPE reading in context using the
-  percentile and peak supplied, and be honest that stretched valuation says a
-  lot about the next decade and almost nothing about the next year. Note any
-  divergence between the tape and the internals. Finish with your read on
-  which part of the cycle this most resembles, and what would change that
-  view. This is the section he uses to think about cycle positioning, so give
-  him something substantive rather than a hedge.
+"health_analysis": string. 4 to 6 short sentences, under 140 words. Whether
+  the market as a whole is healthy. Are most stocks rising or only a few of
+  the biggest. How expensive shares are compared with history, using the
+  percentile supplied, and be honest that expensive markets say a lot about
+  the next ten years and almost nothing about the next twelve months. Finish
+  with which part of the cycle this looks like.
 
 "lean": string, exactly one of "bullish", "leaning bullish", "neutral",
   "leaning bearish", "bearish". Your overall near term read.
 
-"lean_reason": string, one sentence, under 20 words, on why.
+"lean_reason": string, one plain sentence, under 18 words.
 
 "news_picks": array of exactly 10 objects, each
   {"title": string, "why": string, "tone": string, "tickers": string}.
-  "tone" must be exactly one of: "high bullish", "lean bullish", "neutral",
-  "lean bearish", "high bearish". Judge the story's implication for markets or
-  for the specific companies involved, not the mood of the writing. Reserve
-  "high" for something that genuinely changes the picture, such as a major
-  policy shift, a big earnings surprise, a war or a shock data print. Most
-  stories are "lean" or "neutral", so do not inflate them. "tickers" is a
-  short comma separated list of affected tickers he holds or watches, or an
-  empty string if none apply.
-  Pick the headlines that genuinely matter to a long term investor from the
-  list supplied, OR from the company news on his own positions. Copy each
-  title exactly as given, character for character, and do NOT include the
-  source name in square brackets, or the link will break.
-  "why" is one sentence on why it matters to him. Rank them most important
-  first. Prefer stories with real economic or company substance over opinion
-  pieces, stock picking listicles, and anything phrased as a prediction or a
-  teaser. Spread the picks across outlets rather than taking several from one.
-  Cover different ground with each pick: macro, rates, a major company, the
-  sector he is exposed to, and anything overseas that matters.
+  Pick from the market headlines OR from the company news on his own
+  positions. Copy each title exactly, character for character, with no source
+  name in brackets, or the link will break.
+  "why" is ONE short sentence, under 25 words, in plain English, saying why it
+  matters to him specifically.
+  "tone" is exactly one of "high bullish", "lean bullish", "neutral",
+  "lean bearish", "high bearish", judged on what the story means for prices,
+  not the mood of the writing. Reserve "high" for something that genuinely
+  changes the picture. Most stories are "lean" or "neutral".
+  "tickers" is a short comma separated list of affected tickers he holds or
+  watches, or an empty string.
+  Rank them most important first.
+
+ECONOMIC DATA RULE. A release has a result only if the data block marks it
+RELEASED and gives an actual value. Anything marked otherwise has no result:
+you may say what is expected and when it is due, but never say it came in at
+a number, rose, fell, missed or beat. If the coverage block supplies a figure
+for a release the feed left blank, you may use that figure, but say it came
+from press coverage. Never invent a consensus number that was not supplied.
 
 NUMBERS RULE, this matters more than anything else above. Every number you
 write must appear verbatim in the MARKET DATA block. Do not estimate a level
 from the chart images, do not convert a percentage into a level, do not recall
-a figure from memory, and do not describe anything as elevated, cheap, extended
-or historically high unless the data block gives you the comparison. The charts
-are for reading shape and direction only, never for reading values off an axis.
-If you want to cite a number you have not been given, leave it out and describe
-the direction instead.
+a figure from memory, and do not describe anything as elevated, cheap,
+extended or historically high unless the data block gives you the comparison.
+The charts are for reading shape and direction only, never for reading values
+off an axis. If you want to cite a number you have not been given, leave it
+out and describe the direction instead.
 
 Do not use hyphens as punctuation anywhere in your output."""
 
@@ -1203,7 +1279,7 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     news, port, analysts, earnings, prev_state, tech=None,
                     my_news=None, fundamentals=None, earn_hist=None,
                     shorted=None, intraday=None, health=None,
-                    sentiment=None, buzz=None):
+                    sentiment=None, buzz=None, verified=None):
     """Compact text block handed to the model."""
     def line(names):
         return "; ".join(
@@ -1399,9 +1475,44 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
         parts.append("Near key moving averages: " + "; ".join(
             f"{r['sym']} {r['gap']:+.1f}% vs {r['ma']}d" for r in near_ma[:10]))
     if cal_today:
-        parts.append("Today's US data: " + "; ".join(
-            f"{c['title']} actual {c['actual'] or 'pending'} vs forecast {c['forecast'] or 'na'}"
-            for c in cal_today))
+        released, pending = [], []
+        for c in cal_today:
+            if c.get("actual"):
+                released.append(
+                    f"{c['title']} RELEASED: actual {c['actual']}, forecast "
+                    f"{c['forecast'] or 'na'}, prior {c['previous'] or 'na'}")
+            else:
+                pending.append(
+                    f"{c['title']} NOT YET RELEASED at {c['time']} MT: forecast "
+                    f"{c['forecast'] or 'na'}, prior {c['previous'] or 'na'}")
+        if released:
+            parts.append("Today's US data already OUT: " + "; ".join(released))
+        if pending:
+            parts.append(
+                "Today's US data with NO RESULT IN THE CALENDAR FEED. The "
+                "numbers below are FORECASTS, not results. Do not report a "
+                "forecast as though it were released: " + "; ".join(pending))
+    if verified:
+        block = [
+            "COVERAGE OF RELEASES THE FEED HAS NOT FILLED IN. The calendar "
+            "feed lags, so a release can be out and widely reported while the "
+            "feed still shows nothing. Below is news coverage from the last "
+            "day for each such release. If the coverage states an actual "
+            "figure, use it and say it came from press coverage rather than "
+            "the calendar. If two sources disagree, say so. If the coverage "
+            "does not clearly state a result, treat the release as still "
+            "pending. Never average, round or infer a figure that is not "
+            "written here."]
+        for v in verified:
+            ev = v["event"]
+            block.append(
+                f"\n{ev['title']} (forecast {ev['forecast'] or 'na'}, prior "
+                f"{ev['previous'] or 'na'}):")
+            for c in v["coverage"]:
+                block.append(f"  HEADLINE: {c['headline']}")
+                if c.get("text"):
+                    block.append(f"  ARTICLE: {c['text'][:900]}")
+        parts.append("\n".join(block))
     if cal_ahead:
         parts.append("Rest of week: " + "; ".join(
             f"{c['day']} {c['title']}" for c in cal_ahead[:10]))
@@ -2163,7 +2274,7 @@ def cal_table(rows, show_day=False):
          f"<td>{c['time']}</td>"
          f"<td>{c['title']}"
          f"{' <span class=hi>high</span>' if c['impact'] == 'High' else ''}</td>"
-         f"<td class='num'>{c['actual'] or '-'}</td>"
+         f"<td class='num'>{c['actual'] or "<span class='small'>due</span>"}</td>"
          f"<td class='num'>{c['forecast'] or '-'}</td>"
          f"<td class='num'>{c['previous'] or '-'}</td></tr>")
         for c in rows)
@@ -2830,6 +2941,7 @@ def main():
 
     news = get_news(limit=NEWS_POOL)
     cal_today, cal_ahead = get_calendar()
+    verified = verify_releases([c for c in cal_today if not c.get("actual")])
     fng = get_fear_greed()
 
     health = market_health()
@@ -2860,7 +2972,7 @@ def main():
                               cal_ahead, news, port, analysts, earnings,
                               prev_today, tech, my_news, fundamentals,
                               earn_hist, shorted, intraday, health,
-                              sentiment, buzz)
+                              sentiment, buzz, verified)
     brief, ai_used = ai_brief(payload, [chart, daily], quotes, fng, movers,
                               cal_today, port)
 
