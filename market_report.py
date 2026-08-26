@@ -2106,11 +2106,12 @@ def breadth_verdict(above50, above200):
     return ("Mixed. Neither figure is at an extreme, so breadth is not saying "
             "much either way right now.")
 
-
 def hist_row(label, h, dp=1):
     """One valuation line with its own history alongside it."""
     if not h:
         return ""
+    p = h['percentile']
+    suffix = "st" if p % 10 == 1 and p // 10 != 1 else "nd" if p % 10 == 2 and p // 10 != 1 else "rd" if p % 10 == 3 and p // 10 != 1 else "th"
     return (f"<tr><td>{label}</td>"
             f"<td class='num'><b>{h['current']:,.{dp}f}</b></td>"
             f"<td class='num'>{h['mean']:,.{dp}f}</td>"
@@ -2118,8 +2119,7 @@ def hist_row(label, h, dp=1):
             f"<td class='num'>{h['peak']:,.{dp}f}</td>"
             f"<td class='small'>{h['peak_date']}</td>"
             f"<td class='num {cls(h['percentile'] - 50)}'>"
-            f"{h["percentile"]:.0f}{"st" if h["percentile"]%10==1 and h["percentile"]//10!=1 else "nd" if h["percentile"]%10==2 and h["percentile"]//10!=1 else "rd" if h["percentile"]%10==3 and h["percentile"]//10!=1 else "th"}</td></tr>")
-
+            f"{p:.0f}{suffix}</td></tr>")
 
 def health_block(h):
     """Market wide breadth, valuation and risk pricing, with context."""
