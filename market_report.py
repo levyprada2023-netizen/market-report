@@ -1,12 +1,16 @@
 """
 Market Report Emailer
-Sends a market synopsis by email three times a day.
+
+Runs on demand only. There is no schedule and no internal gating: every time
+this script is executed it builds the report and sends it. Trigger it from
+the GitHub Actions Run workflow button, a phone shortcut, or any external
+scheduler that calls the workflow_dispatch API.
 
 Setup:
-  pip install yfinance mplfinance feedparser pandas matplotlib requests
+  pip install yfinance mplfinance feedparser pandas matplotlib requests weasyprint
   Set MAIL_TO below and put your Resend key in the RESEND_API_KEY env var.
 
-Test run (writes report.html locally, sends nothing):
+Test run (writes report.html and report.pdf locally, sends nothing):
   python market_report.py --preview
 """
 
@@ -272,7 +276,7 @@ def get_quotes(symbols):
     df = yf.download(symbols, period="10d", interval="1d", progress=False,
                      auto_adjust=False, threads=True)
     close, opn = df["Close"], df["Open"]
-    if getattr(close, "ndim", 1) == 1:                 # single symbol
+    if getattr(close, "ndim", 1) == 1:                # single symbol
         close, opn = close.to_frame(symbols[0]), opn.to_frame(symbols[0])
 
     # fast_info reports the regular session close, not the extended session,
@@ -379,7 +383,7 @@ def _cnn_items(url, cap, source):
                     "source": source, "paywalled": False, "summary": ""})
         if len(out) >= cap:
             break
-    if not out:                     # markup changed, fall back to headlines only
+    if not out:                      # markup changed, fall back to headlines only
         for title in re.findall(
                 r'container__headline-text[^>]*>([^<]{15,160})<', html)[:cap]:
             title = re.sub(r"\s+", " ", title).strip()
@@ -419,7 +423,7 @@ def _squeez_items(url, cap, source):
         key = re.sub(r"[^a-z0-9]", "", title.lower())[:12]
         if key and key not in re.sub(r"[^a-z0-9]", "", slug):
             if len(out) and not slug.startswith(key[:5]):
-                pass                                # keep it, beehiiv slugs drift
+                pass                              # keep it, beehiiv slugs drift
         seen.add(slug)
         out.append({
             "title": title,
@@ -1335,9 +1339,9 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             f"Advancers {h['advancers']} vs decliners {h['decliners']}"
             + (f" (ratio {h['ad_ratio']:.2f})" if h.get("ad_ratio") else "")
             + f"; median stock {h['median_move']:+.2f}%; "
-            + f"{h['above50']:.0f}% above their 50 day average; "
-            + f"{h['above200']:.0f}% above their 200 day; "
-            + f"{h['new_highs']} new 52 week highs vs {h['new_lows']} new lows.\n"
+            f"{h['above50']:.0f}% above their 50 day average; "
+            f"{h['above200']:.0f}% above their 200 day; "
+            f"{h['new_highs']} new 52 week highs vs {h['new_lows']} new lows.\n"
             + (f"Equal weight vs cap weight (RSP minus SPY): today "
                f"{h['rsp_spy_day']:+.2f}%, past month {h['rsp_spy_month']:+.2f}%, "
                f"past quarter {h['rsp_spy_qtr']:+.2f}%. Negative means the "
@@ -1526,14 +1530,24 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
         lines.append(f"- {tag} {n['title']}"
                      + (f"\n    {n['summary']}" if n.get("summary") else ""))
     parts.append(
-        "HEADLINES from Yahoo Finance, CNBC, Reuters, CNN Business and "
-        "Bloomberg, some with a summary line beneath. Use all of them to "
-        "inform your macro analysis. When choosing news_picks, prefer stories "
-        "the reader can actually open: items marked PAYWALLED need a "
-        "subscription, so only pick one if it is clearly more important than "
-        "the free alternatives. Judge on merit, not outlet, and skip "
-        "clickbait, listicles and prediction teasers. Fewer than four picks is "
-        "fine if fewer than four matter:\n" + "\n".join(lines))
+        "HEADLINES from twenty one outlets, some with a summary line beneath. "
+        "Use all of them to inform your macro analysis.\n\n"
+        "HOW TO RANK THEM when choosing news_picks:\n"
+        "1. Anything that moves the whole market comes first, whatever the "
+        "source. That means the Fed and Chair Warsh, FOMC decisions and "
+        "minutes, Treasury Secretary Bessent, the President, tariffs and "
+        "trade policy, wars and geopolitical shocks, and scheduled economic "
+        "data such as CPI, PCE, GDP, payrolls and claims.\n"
+        "2. Items marked [Short Squeez] are from a human curated newsletter "
+        "where an editor already judged the story worth writing about, so "
+        "weight them above an equivalent wire headline. They are not market "
+        "moving on their own, so they never outrank category 1.\n"
+        "3. Company news that touches what he holds or watches.\n"
+        "4. Everything else on merit.\n\n"
+        "Items marked PAYWALLED need a subscription, so only pick one if it "
+        "is clearly more important than a free alternative. Skip clickbait, "
+        "listicles and prediction teasers. Give ten, ranked by importance:\n"
+        + "\n".join(lines))
     return "\n\n".join(parts)
 
 
@@ -1965,9 +1979,9 @@ CSS = """
 .hdr{font-size:20px;font-weight:700;color:#e6edf3;}
 .hi{color:#f0b429 !important;font-size:11px;font-weight:600;}
 .lede{background:#161b22;color:#e6edf3;border-left:3px solid #58a6ff;border-radius:6px;
-     padding:14px 16px;margin:14px 0 6px;font-size:15px;line-height:1.55;}
+      padding:14px 16px;margin:14px 0 6px;font-size:15px;line-height:1.55;}
 .think{background:#161b22;color:#e6edf3;border-left:3px solid #f0b429;border-radius:6px;
-     padding:14px 16px;margin:6px 0;font-size:14px;line-height:1.55;}
+      padding:14px 16px;margin:6px 0;font-size:14px;line-height:1.55;}
 details{margin-top:8px;} summary{cursor:pointer;color:#8b949e;}
 """
 
@@ -2107,12 +2121,21 @@ def breadth_verdict(above50, above200):
             "much either way right now.")
 
 
+def ordinal(v):
+    """42.0 becomes 42nd. Kept out of the f-string so this stays valid on
+    Python 3.11, where nested double quotes inside an f-string are illegal."""
+    n = int(round(float(v)))
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 def hist_row(label, h, dp=1):
     """One valuation line with its own history alongside it."""
     if not h:
         return ""
-    p = h['percentile']
-    suffix = 'st' if p % 10 == 1 and p // 10 != 1 else 'nd' if p % 10 == 2 and p // 10 != 1 else 'rd' if p % 10 == 3 and p // 10 != 1 else 'th'
     return (f"<tr><td>{label}</td>"
             f"<td class='num'><b>{h['current']:,.{dp}f}</b></td>"
             f"<td class='num'>{h['mean']:,.{dp}f}</td>"
@@ -2120,7 +2143,7 @@ def hist_row(label, h, dp=1):
             f"<td class='num'>{h['peak']:,.{dp}f}</td>"
             f"<td class='small'>{h['peak_date']}</td>"
             f"<td class='num {cls(h['percentile'] - 50)}'>"
-            f"{p:.0f}{suffix}</td></tr>")
+            f"{ordinal(h['percentile'])}</td></tr>")
 
 
 def health_block(h):
@@ -2267,23 +2290,22 @@ def fng_block(f):
             f"<td>{f['month']:.0f}</td><td>{f['year']:.0f}</td></tr></table>")
 
 
+DUE_TAG = "<span class='small'>due</span>"
+
+
 def cal_table(rows, show_day=False):
     if not rows:
         return "<p class='small'>Nothing scheduled at medium or high impact.</p>"
     day_h = "<th>Day</th>" if show_day else ""
-    out_lines = []
-    for c in rows:
-        actual_val = c['actual'] if c['actual'] else "<span class='small'>due</span>"
-        out_lines.append(
-            f"<tr>{'<td>' + c['day'] + '</td>' if show_day else ''}"
-            f"<td>{c['time']}</td>"
-            f"<td>{c['title']}"
-            f"{' <span class=hi>high</span>' if c['impact'] == 'High' else ''}</td>"
-            f"<td class='num'>{actual_val}</td>"
-            f"<td class='num'>{c['forecast'] or '-'}</td>"
-            f"<td class='num'>{c['previous'] or '-'}</td></tr>"
-        )
-    out = "".join(out_lines)
+    out = "".join(
+        (f"<tr>{'<td>' + c['day'] + '</td>' if show_day else ''}"
+         f"<td>{c['time']}</td>"
+         f"<td>{c['title']}"
+         f"{' <span class=hi>high</span>' if c['impact'] == 'High' else ''}</td>"
+         f"<td class='num'>{c['actual'] or DUE_TAG}</td>"
+         f"<td class='num'>{c['forecast'] or '-'}</td>"
+         f"<td class='num'>{c['previous'] or '-'}</td></tr>")
+        for c in rows)
     return (f"<table><tr>{day_h}<th>Time MT</th><th>Event</th>"
             f"<th class='num'>Actual</th><th class='num'>Forecast</th>"
             f"<th class='num'>Prior</th></tr>{out}</table>")
@@ -2476,7 +2498,7 @@ def portfolio_block(port, ai_note):
     footnotes.append(f"Positions read from {port.get('source', 'config')}")
     foot = "<p class='small'>" + ". ".join(footnotes) + ".</p>"
 
-    return (f"hi <h2>Your portfolio</h2>"
+    return (f"<h2>Your portfolio</h2>"
             f"<div style='font-size:24px;font-weight:700'>"
             f"{CURRENCY} {port['value']:,.0f}</div>"
             f"<div class='{col}' style='font-size:16px;font-weight:600'>"
@@ -2888,25 +2910,14 @@ def send_email(subject, html, images, pdf=None, pdf_name="market-report.pdf"):
 
 
 def slot_name():
-    """Which report is due, based on New York time. None if no run is due."""
+    """Label for the report, based on where we are in the New York session."""
     now = dt.datetime.now(MARKET_TZ)
-    for h, m, label in TARGETS_ET:
-        target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        if abs((now - target).total_seconds()) <= WINDOW_MIN * 60:
-            return label
-    return None
-
-
-def market_traded_today():
-    """True if the US market has a bar for today. Catches weekends and holidays."""
-    try:
-        df = yf.download("SPY", period="5d", interval="1d",
-                         progress=False, auto_adjust=False)
-        last = df.index[-1].date()
-        return last == dt.datetime.now(MARKET_TZ).date()
-    except Exception as e:
-        print(f"market day check failed, running anyway: {e}", file=sys.stderr)
-        return True
+    t = now.hour * 60 + now.minute
+    if t < 9 * 60 + 30:
+        return "Pre-market report"
+    if t <= 16 * 60:
+        return "Midday report"
+    return "Closing report"
 
 
 def main():
@@ -2914,18 +2925,13 @@ def main():
     ap.add_argument("--preview", action="store_true",
                     help="write report.html and images locally, send nothing")
     ap.add_argument("--force", action="store_true",
-                    help="send even if no report is currently due")
+                    help="kept for compatibility, every run sends regardless")
     ap.add_argument("--weekly", action="store_true",
                     help="weekend edition, wider lookback and no time gate")
     args = ap.parse_args()
 
-    if not (args.preview or args.force or args.weekly):
-        if slot_name() is None:
-            print("no report due right now, exiting")
-            return
-        if not market_traded_today():
-            print("market closed today, exiting")
-            return
+    # No gating. Every manual press and every cron fires a report.
+    prev_state = read_state()
 
     symbols = (list(INDEXES) + list(SPOT_INDEXES) + list(SECTORS)
                + list(MEGACAPS) + list(CRYPTO) + list(COMMODITIES)
@@ -2969,9 +2975,8 @@ def main():
     earn_hist = get_earnings_history(watch)
     shorted = heavily_shorted(fundamentals)
 
-    prev = read_state()
     today_key = dt.datetime.now(MARKET_TZ).date().isoformat()
-    prev_today = prev if prev.get("date") == today_key else {}
+    prev_today = prev_state if prev_state.get("date") == today_key else {}
 
     tech = index_technicals(CHART_SYMBOL)
     payload = summary_payload(quotes, fng, movers, near_ma, cal_today,
@@ -3024,7 +3029,8 @@ def main():
     pdf = build_pdf(pdf_html, images)
     stamp = dt.datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     send_email(subject, html, images, pdf, f"market-report-{stamp}.pdf")
-    write_state({"date": today_key, "slot": slot,
+    write_state({"date": today_key, "slot": slot, "sent": True,
+                 "sent_at": dt.datetime.now(MARKET_TZ).isoformat(timespec="minutes"),
                  "summary": brief["summary"],
                  "spx": quotes.get("^GSPC", {}).get("last")})
     print("sent:", subject)
