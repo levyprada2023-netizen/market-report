@@ -1,14 +1,9 @@
 name: market report
 
+# Manual only. No schedule. The report runs when you press Run workflow,
+# or when something calls the workflow_dispatch API, such as a phone
+# shortcut or an external scheduler.
 on:
-  schedule:
-    # One report per trading day, 10 minutes after the 4pm ET close.
-    # Two triggers cover US daylight and standard time. The script checks
-    # New York time and exits silently unless a report is actually due.
-    - cron: '10 20 * * 1-5'   # 16:10 ET during US daylight time
-    - cron: '10 21 * * 1-5'   # 16:10 ET during US standard time
-    # Weekend review, Sunday 9am Mountain
-    - cron: '0 15 * * 0'
   workflow_dispatch:
 
 permissions:
@@ -19,23 +14,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+
       - name: system libraries for PDF rendering
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
 
       - run: pip install yfinance mplfinance feedparser pandas matplotlib requests weasyprint
 
       - name: run report
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            python market_report.py --force
-          elif [ "$(date -u +%u)" = "7" ]; then
-            python market_report.py --weekly
-          else
-            python market_report.py
-          fi
+        run: python market_report.py
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
