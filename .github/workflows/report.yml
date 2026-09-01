@@ -1,10 +1,27 @@
 name: market report
 
-# Manual only. No schedule. The report runs when you press Run workflow,
-# or when something calls the workflow_dispatch API, such as a phone
-# shortcut or an external scheduler.
+# Manual only. No schedule. Press Run workflow, optionally type a question,
+# and the report comes back with an answer to it at the top.
 on:
   workflow_dispatch:
+    inputs:
+      question:
+        description: 'Ask anything (optional). e.g. Why did GOOG drop so much today?'
+        required: false
+        type: string
+      tickers:
+        description: 'Tickers to dig into (optional, comma separated). e.g. GOOG, MU, RGTI'
+        required: false
+        type: string
+      depth:
+        description: 'How deep should the answer go?'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - short
+          - normal
+          - deep
 
 permissions:
   contents: write
@@ -30,6 +47,9 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           HOLDINGS_CSV_URL: ${{ secrets.HOLDINGS_CSV_URL }}
+          REPORT_QUESTION: ${{ inputs.question }}
+          REPORT_TICKERS: ${{ inputs.tickers }}
+          REPORT_DEPTH: ${{ inputs.depth }}
 
       - name: remember this report
         run: |
