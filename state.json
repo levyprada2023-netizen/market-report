@@ -1,8 +1,8 @@
 {
- "date": "2026-08-31",
- "slot": "Closing report",
+ "date": "2026-09-01",
+ "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-08-31T18:10-04:00",
- "summary": "The S&P 500 fell to 7,686.14 today, down 0.33%, as fresh US and Iran military strikes sent oil prices up 3.49% to $86.31 a barrel. Higher oil raises inflation fears, which in turn pushes bond yields up and stock prices down. Technology held up best, rising 0.44%, while most other sectors fell. Bitcoin gained 1.46% to $78,968 and gold edged up 0.43%, both acting as safe havens. A big week of jobs data begins Tuesday, starting with job openings and manufacturing reports.",
- "spx": 7686.14013671875
+ "sent_at": "2026-09-01T16:19-04:00",
+ "summary": "The S&P 500 fell to 7,631.47, down 0.71%, as a one-two punch hit markets: U.S. strikes on Iranian targets in the Strait of Hormuz sent crude oil up 5.89% to 90.81 a barrel, stoking fears that higher energy costs will push inflation back up, which would force the Federal Reserve to keep interest rates high longer. The VIX, which measures how much fear is priced into the market, jumped 9.18% to 16.29. Gold fell 1.23% and Bitcoin dropped 1.53%, so there was no safe haven trade today. The big event this week is Friday's jobs report, which will tell us whether the economy is strong enough to absorb higher oil prices.",
+ "spx": 7631.47021484375
 }
