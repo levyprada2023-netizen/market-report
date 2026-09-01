@@ -168,6 +168,29 @@ MRNA JPM DELL USAR SKHY MU SHOP PLTR INTC RGTI IONQ AMD DIS CVNA CAKE
 KO MCD SPY QQQ
 """.split()
 AI_MODEL = "claude-sonnet-4-6"
+
+# Optional question typed into the Run workflow box. Empty on a plain run.
+QUESTION = os.environ.get("REPORT_QUESTION", "").strip()
+QUESTION_TICKERS = os.environ.get("REPORT_TICKERS", "").strip()
+QUESTION_DEPTH = (os.environ.get("REPORT_DEPTH", "") or "normal").strip().lower()
+
+DEPTH_RULES = {
+    "short": "Answer in 3 to 4 sentences, under 90 words. Get to the point.",
+    "normal": "Answer in 6 to 10 sentences, under 200 words.",
+    "deep": ("Answer thoroughly, 15 to 25 sentences, up to 500 words. Use "
+             "short paragraphs separated by <br><br>. Cover the evidence, "
+             "what it implies, what argues against it, and what you would "
+             "watch next."),
+}
+
+# Words that look like tickers but are not, so a question does not send the
+# script chasing quotes for AND, THE or CEO.
+NOT_TICKERS = set("""
+A I AN AS AT BE BY DO GO IF IN IS IT MY NO OF ON OR SO TO UP US WE
+AND ARE BUT CAN DID FOR HAS HAD HOW ITS NOT NOW OUT SEE THE WAS WHO WHY YOU
+CEO CFO ETF IPO USA GDP CPI PCE FED SEC IRS AI EPS PE ROI YOY QOQ
+FROM THIS THAT WITH WHAT WHEN OVER MUCH JUST LIKE MORE MOST WILL
+""".split())
 STATE_FILE = "state.json"
 
 from positions import load_positions, currency_of
@@ -1051,6 +1074,103 @@ def near_moving_averages(rows, tol=MA_NEAR_PCT):
     return out
 
 
+def extract_tickers(text, explicit=""):
+    """Pull tickers out of a free text question.
+
+    Anything after a dollar sign is taken as written. Bare uppercase words
+    are candidates, filtered against a stop list and then confirmed by
+    checking each one actually prices, so a typo does not become a section.
+    """
+    found = []
+    for t in re.findall(r"\$([A-Za-z][A-Za-z.\-]{0,6})", text or ""):
+        found.append(t.upper())
+    for t in re.findall(r"\b([A-Z][A-Z.\-]{0,5})\b", text or ""):
+        if t not in NOT_TICKERS:
+            found.append(t)
+    for t in re.split(r"[,\s]+", explicit or ""):
+        t = t.strip().upper()
+        if t:
+            found.append(t)
+
+    # anything already known to us needs no verification
+    known = set(HOLDINGS) | set(WATCHLIST) | set(UNIVERSE)
+    out, unverified = [], []
+    for t in dict.fromkeys(found):
+        (out if t in known else unverified).append(t)
+
+    for t in unverified[:8]:
+        try:
+            d = yf.download(t, period="5d", interval="1d", progress=False,
+                            auto_adjust=False)
+            if len(d.get("Close", []).dropna()):
+                out.append(t)
+        except Exception:
+            continue
+    return list(dict.fromkeys(out))[:10]
+
+
+def question_context(tickers):
+    """Everything worth knowing about the names a question mentions."""
+    if not tickers:
+        return ""
+
+    quotes = get_quotes(tickers)
+    fundamentals = get_fundamentals(tickers)
+    analysts = get_analysts(tickers)
+    earnings = get_earnings(tickers, ahead_days=45, back_days=10)
+    hist = get_earnings_history(tickers)
+
+    lines = ["DATA ON THE TICKERS IN HIS QUESTION. Use these figures rather "
+             "than anything you recall, and say so if something he asked "
+             "about is not covered here."]
+
+    for t in tickers:
+        q = quotes.get(t)
+        if not q:
+            lines.append(f"\n{t}: no price data found")
+            continue
+        bits = [f"\n{t}: close {q['last']:,.2f}, {q['pct']:+.2f}% "
+                f"({q['dollar']:+,.2f}) on the session"]
+        if q.get("ext_pct") is not None:
+            bits.append(f"; {q['ext']:,.2f} ({q['ext_pct']:+.2f}%) in the "
+                        "extended session")
+        f = fundamentals.get(t)
+        if f:
+            bits.append(
+                f". Market cap {fmt((f['mcap'] or 0) / 1e9, 1, 'B')}, "
+                f"trailing PE {fmt(f['pe'])}, forward PE {fmt(f['fwd_pe'])}, "
+                f"PS {fmt(f['ps'])}, PEG {fmt(f['peg'], 2)}, revenue growth "
+                f"{fmt(f['rev_growth'], 0, '%')}, margin "
+                f"{fmt(f['margin'], 0, '%')}")
+            if f.get("short_pct"):
+                bits.append(f", short interest {f['short_pct']:.1f}% of float")
+        a = analysts.get(t)
+        if a:
+            bits.append(f". Analyst mean target {a['mean']:,.2f} "
+                        f"({a['upside']:+.1f}% from here), rating "
+                        f"{a['rating'] or 'na'}, {a['count'] or '?'} analysts")
+        h = hist.get(t)
+        if h:
+            bits.append(f". Beat estimates in {h['beats']} of the last "
+                        f"{h['of']} quarters, last surprise "
+                        f"{h['rows'][-1]['surprise']:+.1f}%")
+        e = next((x for x in earnings if x["sym"] == t), None)
+        if e:
+            bits.append(f". Earnings {'reported' if e['reported'] else 'due'} "
+                        f"{e['date'].strftime('%b %d')}")
+        if t in HOLDINGS:
+            bits.append(f". HE OWNS {HOLDINGS[t]:,.0f} shares")
+        elif t in WATCHLIST:
+            bits.append(". On his watchlist")
+        lines.append("".join(bits))
+
+        news = symbol_news(t, limit=5, max_age_hours=72)
+        for n in news:
+            lines.append(f"    NEWS: {n['title']}")
+
+    return "\n".join(lines)
+
+
 def fallback_summary(quotes, fng, movers, cal_today, port):
     """Plain summary used when no Anthropic key is configured."""
     def p(sym):
@@ -1136,6 +1256,17 @@ Return ONLY a JSON object, no markdown fences, with these keys:
   the next ten years and almost nothing about the next twelve months. Finish
   with which part of the cycle this looks like.
 
+"answer": string. ONLY if a question was supplied in the data block under
+  HIS QUESTION, otherwise return "". Answer that question directly and first,
+  before anything else. Follow the length rule given with the question. Same
+  plain English rules as everything else. Use the data supplied on the
+  tickers he mentioned. If the data does not settle it, say what you can
+  support and what you cannot rather than filling the gap. He is asking
+  because he wants your actual read, so give one. Do not lecture him about
+  his strategy, do not comment on whether the question is consistent with
+  anything he has said before, and do not append warnings he did not ask
+  for. Answer the question he asked.
+
 "lean": string, exactly one of "bullish", "leaning bullish", "neutral",
   "leaning bearish", "bearish". Your overall near term read.
 
@@ -1180,8 +1311,8 @@ def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
     blank = {
         "summary": fallback_summary(quotes, fng, movers, cal_today, port),
         "portfolio_analysis": "", "technical_analysis": "",
-        "macro_analysis": "", "health_analysis": "", "lean": "",
-        "lean_reason": "", "news_picks": [],
+        "macro_analysis": "", "health_analysis": "", "answer": "",
+        "lean": "", "lean_reason": "", "news_picks": [],
     }
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
@@ -1283,14 +1414,23 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     news, port, analysts, earnings, prev_state, tech=None,
                     my_news=None, fundamentals=None, earn_hist=None,
                     shorted=None, intraday=None, health=None,
-                    sentiment=None, buzz=None, verified=None):
+                    sentiment=None, buzz=None, verified=None,
+                    q_context=""):
     """Compact text block handed to the model."""
     def line(names):
         return "; ".join(
             f"{lab} at {quotes[s]['last']:,.2f} ({quotes[s]['pct']:+.2f}%)"
             for s, lab in names.items() if s in quotes)
 
-    parts = [
+    parts = []
+    if QUESTION:
+        parts.append(
+            "HIS QUESTION, answer this first in the answer field:\n"
+            f"  {QUESTION}\n"
+            f"Length: {DEPTH_RULES.get(QUESTION_DEPTH, DEPTH_RULES['normal'])}")
+    if q_context:
+        parts.append(q_context)
+    parts += [
         f"US markets, tradable index funds: {line(INDEXES)}",
         f"US cash indices and rates: {line(SPOT_INDEXES)}",
         f"Sectors: {line(SECTORS)}",
@@ -2402,6 +2542,23 @@ LEAN_COLORS = {
 }
 
 
+def answer_box(question, text, tickers):
+    """The reply to whatever was typed into the Run workflow box."""
+    if not text:
+        return ""
+    tags = ""
+    if tickers:
+        tags = ("<div class='small' style='margin-top:8px;color:#8b949e'>"
+                "Pulled live data on " + ", ".join(tickers) + "</div>")
+    return (f"<h2 id='answer' style='border-bottom:1px solid #30363d'>You asked</h2>"
+            f"<div style=\"background:#1b2432;color:#c9d1d9;border-left:3px solid "
+            f"#e3b341;border-radius:6px;padding:10px 14px;margin:6px 0 0;"
+            f"font-size:14px;font-style:italic\">{question}</div>"
+            f"<div style=\"background:#161b22;color:#e6edf3;border-left:3px solid "
+            f"#e3b341;border-radius:6px;padding:14px 16px;margin:8px 0 4px;"
+            f"font-size:15px;line-height:1.6\">{text}{tags}</div>")
+
+
 def analysis_box(title, text, accent):
     """One AI written section, visually distinct from the data tables."""
     if not text:
@@ -2736,7 +2893,7 @@ def news_block(picks, news, my_news=None):
 
 
 NAV = [
-    ("brief", "Brief"), ("portfolio", "Portfolio"), ("charts", "Charts"),
+    ("brief", "Brief"), ("answer", "Your question"), ("portfolio", "Portfolio"), ("charts", "Charts"),
     ("mynews", "Your news"), ("macro", "Macro"), ("news", "Top news"),
     ("movers", "Movers"),
     ("numbers", "The numbers"), ("health", "Market health"),
@@ -2776,7 +2933,8 @@ def all_news_block(news):
 def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                near_ma, brief, ai_used, port, analysts, earnings,
                my_news=None, fundamentals=None, earn_hist=None, shorted=None,
-               health=None, sentiment=None, buzz=None, for_pdf=False):
+               health=None, sentiment=None, buzz=None, q_tickers=None,
+               for_pdf=False):
     now = dt.datetime.now(LOCAL_TZ)
 
     lede = ("<div class='lede' style=\"background:#161b22;color:#e6edf3;"
@@ -2790,7 +2948,8 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
               f"{lean_badge(brief.get('lean'), brief.get('lean_reason'))}"
               f"<div class='small' style='margin-bottom:4px'>"
               f"{'Analysis written by Claude. Not advice, and it does not know your plan or tax position.' if ai_used else 'Auto generated summary. Add an Anthropic key for full analysis.'}"
-              f"</div>")
+              f"</div>"
+              + answer_box(QUESTION, brief.get("answer"), q_tickers or []))
 
     sec_portfolio = ("<a id='portfolio'></a>" + portfolio_block(port, None)
                      + analysis_box("Portfolio analysis",
@@ -2978,24 +3137,35 @@ def main():
     today_key = dt.datetime.now(MARKET_TZ).date().isoformat()
     prev_today = prev_state if prev_state.get("date") == today_key else {}
 
+    q_tickers = extract_tickers(QUESTION, QUESTION_TICKERS) if (
+        QUESTION or QUESTION_TICKERS) else []
+    q_context = question_context(q_tickers) if q_tickers else ""
+    if QUESTION:
+        print(f"question: {QUESTION[:80]}")
+        print(f"tickers pulled: {', '.join(q_tickers) or 'none'}")
+
     tech = index_technicals(CHART_SYMBOL)
     payload = summary_payload(quotes, fng, movers, near_ma, cal_today,
                               cal_ahead, news, port, analysts, earnings,
                               prev_today, tech, my_news, fundamentals,
                               earn_hist, shorted, intraday, health,
-                              sentiment, buzz, verified)
+                              sentiment, buzz, verified, q_context)
     brief, ai_used = ai_brief(payload, [chart, daily], quotes, fng, movers,
                               cal_today, port)
 
-    slot = "Weekend review" if args.weekly else (slot_name() or "Market report")
+    slot = ("Weekend review" if args.weekly
+            else ("Your question, plus the daily report" if QUESTION
+                  else (slot_name() or "Market report")))
     html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                       near_ma, brief, ai_used, port, analysts, earnings,
                       my_news, fundamentals, earn_hist, shorted, health,
-                      sentiment, buzz)
+                      sentiment, buzz, q_tickers)
 
     spx = quotes.get("SPY", {}).get("pct", 0)
     qqq = quotes.get("QQQ", {}).get("pct", 0)
     subject = f"{slot}: SPY {spx:+.2f}%, QQQ {qqq:+.2f}%"
+    if QUESTION:
+        subject = "Re: " + (QUESTION[:60] + ("..." if len(QUESTION) > 60 else ""))
     if port:
         subject += f", you {port['day_pl']:+,.0f}"
 
@@ -3010,7 +3180,7 @@ def main():
         pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng,
                               movers, near_ma, brief, ai_used, port, analysts,
                               earnings, my_news, fundamentals, earn_hist,
-                              shorted, health, sentiment, buzz,
+                              shorted, health, sentiment, buzz, q_tickers,
                               for_pdf=True)
         pdf = build_pdf(pdf_html, {"heatmap": heat, "chart": chart,
                                    "daily": daily})
@@ -3025,7 +3195,7 @@ def main():
     pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                           near_ma, brief, ai_used, port, analysts, earnings,
                           my_news, fundamentals, earn_hist, shorted, health,
-                          sentiment, buzz, for_pdf=True)
+                          sentiment, buzz, q_tickers, for_pdf=True)
     pdf = build_pdf(pdf_html, images)
     stamp = dt.datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     send_email(subject, html, images, pdf, f"market-report-{stamp}.pdf")
