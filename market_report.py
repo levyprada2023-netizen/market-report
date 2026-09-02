@@ -1267,6 +1267,19 @@ Return ONLY a JSON object, no markdown fences, with these keys:
   anything he has said before, and do not append warnings he did not ask
   for. Answer the question he asked.
 
+"ticker_notes": array. ONLY if the data block lists DEEP DIVE TICKERS,
+  otherwise return []. One object per ticker, each
+  {"ticker": string, "note": string, "verdict": string}.
+  "note" is 4 to 7 short sentences, under 140 words, vetting that name using
+  the data supplied: what it did, what it costs against its growth, what
+  analysts think, its earnings record, anything in the recent news, and how
+  it sits for a 20 year holder. Plain English.
+  "verdict" is one short phrase under 12 words giving your actual read, for
+  example "cheap for the growth, earnings risk in November" or "priced for
+  perfection". Be specific rather than balanced for its own sake.
+  Do this for every deep dive ticker, whether or not a question was also
+  asked. The two are separate requests.
+
 "lean": string, exactly one of "bullish", "leaning bullish", "neutral",
   "leaning bearish", "bearish". Your overall near term read.
 
@@ -1312,6 +1325,7 @@ def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
         "summary": fallback_summary(quotes, fng, movers, cal_today, port),
         "portfolio_analysis": "", "technical_analysis": "",
         "macro_analysis": "", "health_analysis": "", "answer": "",
+        "ticker_notes": [],
         "lean": "", "lean_reason": "", "news_picks": [],
     }
     key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1415,7 +1429,8 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     my_news=None, fundamentals=None, earn_hist=None,
                     shorted=None, intraday=None, health=None,
                     sentiment=None, buzz=None, verified=None,
-                    q_context=""):
+                    q_context="", d_tickers=None, e_results=None,
+                    e_coverage=None, today_cal=None, tracked=None):
     """Compact text block handed to the model."""
     def line(names):
         return "; ".join(
@@ -1428,6 +1443,13 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             "HIS QUESTION, answer this first in the answer field:\n"
             f"  {QUESTION}\n"
             f"Length: {DEPTH_RULES.get(QUESTION_DEPTH, DEPTH_RULES['normal'])}")
+    if d_tickers:
+        parts.append(
+            "DEEP DIVE TICKERS, he asked for these to be vetted individually: "
+            + ", ".join(d_tickers)
+            + ". Produce a ticker_notes entry for each of them. This is a "
+            "separate request from any question above and must be answered "
+            "even if a question was also asked.")
     if q_context:
         parts.append(q_context)
     parts += [
@@ -1576,6 +1598,50 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             f"{s} price {a['price']:,.2f} vs mean target {a['mean']:,.2f} "
             f"({a['upside']:+.1f}%), {a['rating'] or 'na'}, {a['count'] or '?'} analysts"
             for s, a in list(analysts.items())[:14]))
+    if e_results:
+        lines2 = ["EARNINGS RESULTS ALREADY OUT. These are actual reported "
+                  "figures against consensus. Say plainly whether each beat or "
+                  "missed and by how much. If the coverage lines mention "
+                  "guidance or an outlook, report that too, and say it came "
+                  "from press coverage."]
+        for r in sorted(e_results.values(),
+                        key=lambda x: x.get("days_ago", 99)):
+            if not r.get("reported"):
+                continue
+            when = ("TODAY" if r.get("days_ago") == 0 else
+                    f"{r.get('days_ago', '?')} days ago")
+            if r.get("eps") is not None:
+                lines2.append(
+                    f"  {r['sym']}{' (HELD)' if r['held'] else ''} "
+                    f"{r.get('quarter', '')}, reported {when}: EPS "
+                    f"{r['eps']:,.2f} vs consensus {r['estimate']:,.2f}, "
+                    f"{'BEAT' if r['beat'] else 'MISS'} by "
+                    f"{r['surprise_pct']:+.1f}%")
+            else:
+                lines2.append(
+                    f"  {r['sym']}{' (HELD)' if r['held'] else ''} reported "
+                    f"{when}. No vendor consensus yet, so read the figures "
+                    "out of the press release below rather than guessing a "
+                    "beat or miss")
+            for h in (e_coverage or {}).get(r["sym"], []):
+                lines2.append(f"      COVERAGE: {h}")
+            f_ = r.get("filing")
+            if f_:
+                lines2.append(f"      PRESS RELEASE filed {f_['filed']}: "
+                              f"{f_['text'][:2200]}")
+                for g in f_.get("guidance", [])[:5]:
+                    lines2.append(f"      GUIDANCE LINE: {g[:220]}")
+        parts.append("\n".join(lines2))
+    if today_cal and tracked:
+        pend = [(s_, today_cal[s_.split(".")[0]]) for s_ in tracked
+                if s_.split(".")[0] in today_cal
+                and not (e_results or {}).get(s_, {}).get("reported")]
+        if pend:
+            parts.append(
+                "REPORTING TODAY BUT NOT OUT YET. Do not describe these as "
+                "having reported, and do not invent a result: " + "; ".join(
+                    f"{s_}{' (held)' if s_ in HOLDINGS else ''} {i['when']}, "
+                    f"consensus {i['forecast'] or 'na'}" for s_, i in pend))
     if earnings:
         parts.append("Earnings around now: " + "; ".join(
             f"{e['sym']}{' (held)' if e['held'] else ''} "
@@ -1770,6 +1836,268 @@ def get_earnings_history(symbols, quarters=4):
         except Exception as e:
             print(f"earnings history failed {sym}: {e}", file=sys.stderr)
     return out
+
+
+EARN_KW = re.compile(
+    r"\b(beat|beats|miss|missed|misses|topped|exceed\w*|surpass\w*|"
+    r"guidance|outlook|forecast|raise[sd]?|lower\w*|cut|record|"
+    r"earnings|revenue|EPS|profit|results|quarter)\b", re.I)
+
+
+def company_name(sym):
+    """Search by company name, since a bare ticker matches poorly."""
+    try:
+        info = yf.Ticker(sym).info or {}
+        nm = info.get("shortName") or info.get("longName") or ""
+        nm = re.sub(r"\b(Inc|Corp|Corporation|Ltd|Limited|plc|Co|Company|"
+                    r"Holdings|Group|The|Class [A-C]|Technologies|"
+                    r"Incorporated)\b\.?", "", nm, flags=re.I)
+        return re.sub(r"[,.]+", " ", nm).strip() or sym
+    except Exception:
+        return sym
+
+
+NASDAQ_H = {"User-Agent": UA, "Accept": "application/json"}
+NASDAQ_CAL = "https://api.nasdaq.com/api/calendar/earnings?date={date}"
+NASDAQ_SURPRISE = "https://api.nasdaq.com/api/company/{sym}/earnings-surprise"
+SEC_H = {"User-Agent": "market-report " + MAIL_TO}
+SEC_TICKERS = "https://www.sec.gov/files/company_tickers.json"
+_CIK_CACHE = {}
+
+TIME_LABEL = {
+    "time-pre-market": "before the open",
+    "time-after-hours": "after the close",
+    "time-not-supplied": "time not given",
+}
+
+
+def earnings_calendar_day(day):
+    """Who reports on a given day, and whether before the open or after the
+    close. yfinance gives a date but never the time, which is the difference
+    between a result being out already and being hours away."""
+    out = {}
+    try:
+        r = requests.get(NASDAQ_CAL.format(date=day.isoformat()), timeout=25,
+                         headers=NASDAQ_H)
+        rows = ((r.json().get("data") or {}).get("rows")) or []
+        for x in rows:
+            sym = (x.get("symbol") or "").upper()
+            if not sym:
+                continue
+            out[sym] = {
+                "when": TIME_LABEL.get(x.get("time"), x.get("time") or ""),
+                "raw_time": x.get("time") or "",
+                "forecast": x.get("epsForecast") or "",
+                "last_year": x.get("lastYearEPS") or "",
+                "name": x.get("name") or "",
+                "date": day,
+            }
+    except Exception as e:
+        print(f"nasdaq calendar failed {day}: {e}", file=sys.stderr)
+    return out
+
+
+SEC_H = {"User-Agent": f"market report {MAIL_TO}"}
+SEC_TICKERS = "https://www.sec.gov/files/company_tickers.json"
+_CIK_CACHE = {}
+
+
+def sec_cik(sym):
+    """Ticker to SEC CIK. The map is fetched once and reused."""
+    if not _CIK_CACHE:
+        try:
+            data = requests.get(SEC_TICKERS, timeout=25, headers=SEC_H).json()
+            for v in data.values():
+                _CIK_CACHE[v["ticker"].upper()] = str(v["cik_str"]).zfill(10)
+        except Exception as e:
+            print(f"SEC ticker map failed: {e}", file=sys.stderr)
+            _CIK_CACHE["__failed__"] = True
+    return _CIK_CACHE.get(sym.split(".")[0].upper())
+
+
+def sec_earnings_release(sym, back_days=6):
+    """The earnings press release straight from the filing.
+
+    A company files an Item 2.02 8-K within minutes of reporting, long before
+    any data vendor updates. This is the only source that has the numbers on
+    the same afternoon, and it is also the only one carrying guidance.
+    """
+    cik = sec_cik(sym)
+    if not cik:
+        return None
+    today = dt.datetime.now(MARKET_TZ).date()
+    try:
+        sub = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
+                           timeout=25, headers=SEC_H).json()
+        rec = sub["filings"]["recent"]
+    except Exception as e:
+        print(f"SEC submissions failed {sym}: {e}", file=sys.stderr)
+        return None
+
+    for i, form in enumerate(rec.get("form", [])[:40]):
+        if form != "8-K":
+            continue
+        if "2.02" not in (rec.get("items", [""] * 40)[i] or ""):
+            continue
+        try:
+            filed = dt.date.fromisoformat(rec["filingDate"][i])
+        except Exception:
+            continue
+        if not (0 <= (today - filed).days <= back_days):
+            continue
+
+        acc = rec["accessionNumber"][i].replace("-", "")
+        base = (f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}")
+        try:
+            files = [f["name"] for f in
+                     requests.get(base + "/index.json", timeout=25,
+                                  headers=SEC_H).json()["directory"]["item"]]
+        except Exception:
+            continue
+
+        # the press release is the exhibit, not the cover page. Filenames vary
+        # wildly, so match on 99 anywhere and fall back to the biggest html.
+        cands = [f for f in files
+                 if f.lower().endswith((".htm", ".html"))
+                 and "99" in f
+                 and "index" not in f.lower()]
+        if not cands:
+            cands = [f for f in files if f.lower().endswith((".htm", ".html"))
+                     and not re.match(r"^(R\d+|.*index)", f, re.I)]
+        for name in cands:
+            try:
+                html = requests.get(f"{base}/{name}", timeout=25,
+                                    headers=SEC_H).text
+            except Exception:
+                continue
+            txt = re.sub(r"<[^>]+>", " ", html)
+            txt = re.sub(r"&[a-z#0-9]+;", " ", txt)
+            txt = re.sub(r"\s+", " ", txt).strip()
+            if len(txt) < 900 or not re.search(r"\d", txt):
+                continue
+            guide = [m.group(0).strip() for m in re.finditer(
+                r"[^.]{0,180}\b(guidance|outlook|raising|lowering|expects to)"
+                r"\b[^.]{0,180}\.", txt[:14000], re.I)][:6]
+            return {
+                "filed": filed,
+                "days_ago": (today - filed).days,
+                "url": f"{base}/{name}",
+                "text": txt[:5000],
+                "guidance": guide,
+            }
+    return None
+
+
+def earnings_results(symbols, back_days=6):
+    """Actual reported EPS against consensus, for anything that has already
+    reported recently. yfinance lags by a full quarter here, so a company
+    that reported this morning shows nothing in its earnings history."""
+    today = dt.datetime.now(MARKET_TZ).date()
+    out = {}
+    for sym in symbols:
+        base = sym.split(".")[0]          # CM.TO reports under CM
+        try:
+            r = requests.get(NASDAQ_SURPRISE.format(sym=base), timeout=20,
+                             headers=NASDAQ_H)
+            rows = ((r.json().get("data") or {})
+                    .get("earningsSurpriseTable") or {}).get("rows") or []
+        except Exception as e:
+            print(f"earnings surprise failed {sym}: {e}", file=sys.stderr)
+            continue
+        for x in rows:
+            try:
+                d = dt.datetime.strptime(x["dateReported"], "%m/%d/%Y").date()
+            except Exception:
+                continue
+            days = (today - d).days
+            if 0 <= days <= back_days:
+                try:
+                    eps = float(x.get("eps"))
+                    est = float(x.get("consensusForecast"))
+                except Exception:
+                    continue
+                out[sym] = {
+                    "sym": sym,
+                    "name": "",
+                    "date": d,
+                    "days_ago": days,
+                    "quarter": x.get("fiscalQtrEnd", ""),
+                    "eps": eps,
+                    "estimate": est,
+                    "surprise_pct": float(x.get("percentageSurprise") or 0),
+                    "beat": eps > est,
+                    "held": sym in HOLDINGS,
+                }
+                break
+    return out
+
+
+def merge_earnings_sources(symbols, today_cal, back_days=6):
+    """Combine the vendor numbers with the filings.
+
+    Nasdaq gives a clean EPS against consensus but lags by hours, so a
+    company reporting at the bell shows nothing there until the next day.
+    The SEC filing appears within minutes and carries guidance. Whichever
+    exists is used, and when both do they sit side by side.
+    """
+    vendor = earnings_results(symbols, back_days=back_days)
+    today = dt.datetime.now(MARKET_TZ).date()
+
+    # anything scheduled today, plus anything the vendor already has
+    candidates = set(vendor)
+    for sym in symbols:
+        if today_cal.get(sym.split(".")[0]):
+            candidates.add(sym)
+
+    out = {}
+    for sym in sorted(candidates):
+        row = dict(vendor.get(sym) or {})
+        row.setdefault("sym", sym)
+        row.setdefault("held", sym in HOLDINGS)
+        info = today_cal.get(sym.split(".")[0])
+        if info:
+            row["when"] = info["when"]
+            row["raw_time"] = info["raw_time"]
+            row["name"] = info.get("name") or row.get("name") or sym
+            row["scheduled_today"] = True
+            row.setdefault("estimate_str", info.get("forecast", ""))
+        filing = sec_earnings_release(sym, back_days=back_days)
+        if filing:
+            row["filing"] = filing
+            row.setdefault("date", filing["filed"])
+            row.setdefault("days_ago", filing["days_ago"])
+        if row.get("eps") is not None or filing:
+            row["reported"] = True
+        out[sym] = row
+    return out
+
+
+def earnings_coverage(results, per_name=3):
+    """Guidance is not in any API, so it comes from the coverage. Searched by
+    company name because a bare ticker returns too much unrelated noise."""
+    found = {}
+    for sym, r in list(results.items())[:8]:
+        name = r.get("name") or sym
+        for term in (f"{name} earnings guidance", f"{name} quarterly results"):
+            try:
+                url = GOOGLE_NEWS_Q.replace("when:1d", "when:3d").format(
+                    q=requests.utils.quote(term))
+                entries = feedparser.parse(
+                    requests.get(url, timeout=25,
+                                 headers={"User-Agent": UA}).content).entries
+            except Exception:
+                continue
+            items = []
+            for e in entries[:6]:
+                head = (e.get("title") or "").strip()
+                if head:
+                    items.append(head)
+                if len(items) >= per_name:
+                    break
+            if items:
+                found[sym] = items
+                break
+    return found
 
 
 def heavily_shorted(fundamentals, min_pct=5.0, min_mcap=2e9):
@@ -2559,6 +2887,31 @@ def answer_box(question, text, tickers):
             f"font-size:15px;line-height:1.6\">{text}{tags}</div>")
 
 
+def ticker_notes_block(notes, tickers):
+    """Per name write ups for the deep dive field, separate from the answer."""
+    if not notes:
+        return ""
+    cards = ""
+    for n in notes:
+        t = (n.get("ticker") or "").upper()
+        verdict = n.get("verdict", "")
+        cards += (
+            f"<div style=\"background:#161b22;border-left:3px solid #a371f7;"
+            f"border-radius:6px;padding:12px 16px;margin:8px 0\">"
+            f"<div style='font-size:15px;font-weight:700;color:#e6edf3'>{t}"
+            + (f"<span class='small' style='margin-left:8px;color:#a371f7'>"
+               f"{verdict}</span>" if verdict else "")
+            + ("<span class='small' style='margin-left:8px'>held</span>"
+               if t in HOLDINGS else "")
+            + f"</div><div style='color:#e6edf3;font-size:14px;line-height:1.6;"
+              f"margin-top:6px'>{n.get('note','')}</div></div>")
+    return (f"<h2 id='deepdive'>Deep dive</h2>"
+            f"<p class='small'>You asked for these to be vetted: "
+            f"{', '.join(tickers)}. Live prices, valuation, analyst targets, "
+            f"earnings record and recent news were pulled for each.</p>"
+            + cards)
+
+
 def analysis_box(title, text, accent):
     """One AI written section, visually distinct from the data tables."""
     if not text:
@@ -2766,6 +3119,116 @@ def analyst_block(analysts):
             "describe consensus rather than predict it.</p>")
 
 
+def earnings_today(symbols, today_cal, results, back_days=2):
+    """Fill the gap the data vendors leave.
+
+    A company that reports at 4:05pm is in its own SEC filing by 4:10 and in
+    a vendor feed the next morning. So anything scheduled today, or held and
+    filing in the last couple of days, gets read straight from the filing,
+    which also carries the guidance.
+    """
+    out = {}
+    for sym in symbols:
+        if sym in results:
+            continue
+        base = sym.split(".")[0]
+        if base not in today_cal and sym not in HOLDINGS:
+            continue
+        rel = sec_earnings_release(sym, back_days=back_days)
+        if not rel:
+            continue
+        info = today_cal.get(base, {})
+        out[sym] = {
+            "sym": sym,
+            "filed": rel["filed"],
+            "days_ago": rel["days_ago"],
+            "when": info.get("when", ""),
+            "forecast": info.get("forecast", ""),
+            "text": rel["text"],
+            "guidance": rel.get("guidance") or [],
+            "url": rel["url"],
+            "held": sym in HOLDINGS,
+        }
+    return out
+
+
+def results_block(results, coverage, today_cal, tracked):
+    """What actually came out, separated from what is merely scheduled."""
+    reported, due = "", ""
+
+    if results:
+        rows = ""
+        for r in sorted(results.values(),
+                        key=lambda x: x.get("days_ago", 99)):
+            if not r.get("reported"):
+                continue
+            has_eps = r.get("eps") is not None
+            verdict = ("BEAT" if r.get("beat") else "MISS") if has_eps else "FILED"
+            col = ("#30363d" if not has_eps
+                   else "#0b6e3d" if r["beat"] else "#8c1f18")
+            heads = "".join(
+                f"<div class='small' style='margin-top:3px'>{h}</div>"
+                for h in coverage.get(r["sym"], []))
+            if r.get("filing", {}).get("guidance"):
+                heads += "".join(
+                    f"<div class='small' style='margin-top:3px;color:#f0b429'>"
+                    f"{g[:160]}</div>"
+                    for g in r["filing"]["guidance"][:3])
+            d_ago = r.get("days_ago", 0)
+            when = ("today" if d_ago == 0 else "yesterday" if d_ago == 1
+                    else f"{d_ago} days ago")
+            if r.get("when"):
+                when += f", {r['when']}"
+            rows += (
+                f"<tr><td><b>{r['sym']}</b>"
+                + ("<span class='small'> held</span>" if r["held"] else "")
+                + f"</td><td class='small'>{r.get('quarter', '')}</td>"
+                f"<td class='small'>{when}</td>"
+                + (f"<td class='num'>{r['eps']:,.2f}</td>"
+                   f"<td class='num'>{r['estimate']:,.2f}</td>" if has_eps
+                   else "<td class='num small'>see release</td>"
+                        "<td class='num small'>-</td>")
+                +
+                f"<td class='num'><span style=\"background:{col};color:#fff;"
+                f"font-size:10px;font-weight:700;padding:2px 7px;"
+                f"border-radius:9px\">{verdict}"
+                + (f" {r['surprise_pct']:+.1f}%" if has_eps else "")
+                + "</span></td>"
+                f"<td>{heads or '<span class=small>no coverage found</span>'}"
+                f"</td></tr>")
+        reported = ("<p class='small' style='margin:12px 0 2px;color:#e6edf3;"
+                    "font-weight:600'>Already reported</p><table>"
+                    "<tr><th>Ticker</th><th>Quarter</th><th>Reported</th>"
+                    "<th class='num'>EPS</th><th class='num'>Expected</th>"
+                    "<th class='num'>Result</th><th>Coverage, including any "
+                    "guidance</th></tr>" + rows + "</table>")
+
+    pending = []
+    for sym in tracked:
+        base = sym.split(".")[0]
+        info = today_cal.get(base)
+        if info and sym not in results:
+            pending.append((sym, info))
+    if pending:
+        rows = "".join(
+            f"<tr><td><b>{sym}</b>"
+            + ("<span class='small'> held</span>" if sym in HOLDINGS else "")
+            + f"</td><td class='small'>{i['when']}</td>"
+            f"<td class='num'>{i['forecast'] or '-'}</td>"
+            f"<td class='num small'>{i['last_year'] or '-'}</td></tr>"
+            for sym, i in pending)
+        due = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+               "font-weight:600'>Reporting today, result not out yet</p><table>"
+               "<tr><th>Ticker</th><th>When</th><th class='num'>Expected EPS</th>"
+               "<th class='num'>Year ago</th></tr>" + rows + "</table>"
+               "<p class='small'>After the close means the numbers land once "
+               "trading ends, so today's share price does not reflect them.</p>")
+
+    if not reported and not due:
+        return ""
+    return ("<h2 id='results'>Earnings results</h2>" + reported + due)
+
+
 def earnings_block(earnings):
     if not earnings:
         return ""
@@ -2893,8 +3356,9 @@ def news_block(picks, news, my_news=None):
 
 
 NAV = [
-    ("brief", "Brief"), ("answer", "Your question"), ("portfolio", "Portfolio"), ("charts", "Charts"),
-    ("mynews", "Your news"), ("macro", "Macro"), ("news", "Top news"),
+    ("brief", "Brief"), ("answer", "Your question"), ("deepdive", "Deep dive"),
+    ("portfolio", "Portfolio"), ("results", "Earnings results"), ("charts", "Charts"),
+    ("results", "Earnings"), ("mynews", "Your news"), ("macro", "Macro"), ("news", "Top news"),
     ("movers", "Movers"),
     ("numbers", "The numbers"), ("health", "Market health"),
     ("valuation", "Valuation"),
@@ -2934,7 +3398,8 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                near_ma, brief, ai_used, port, analysts, earnings,
                my_news=None, fundamentals=None, earn_hist=None, shorted=None,
                health=None, sentiment=None, buzz=None, q_tickers=None,
-               for_pdf=False):
+               d_tickers=None, e_results=None, e_coverage=None,
+               today_cal=None, tracked=None, for_pdf=False):
     now = dt.datetime.now(LOCAL_TZ)
 
     lede = ("<div class='lede' style=\"background:#161b22;color:#e6edf3;"
@@ -2949,11 +3414,14 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
               f"<div class='small' style='margin-bottom:4px'>"
               f"{'Analysis written by Claude. Not advice, and it does not know your plan or tax position.' if ai_used else 'Auto generated summary. Add an Anthropic key for full analysis.'}"
               f"</div>"
-              + answer_box(QUESTION, brief.get("answer"), q_tickers or []))
+              + answer_box(QUESTION, brief.get("answer"), q_tickers or [])
+              + ticker_notes_block(brief.get("ticker_notes"), d_tickers or []))
 
     sec_portfolio = ("<a id='portfolio'></a>" + portfolio_block(port, None)
                      + analysis_box("Portfolio analysis",
                                     brief.get("portfolio_analysis"), "#3fb950")
+                     + results_block(e_results or {}, e_coverage or {},
+                                     today_cal or {}, tracked or [])
                      + portfolio_news_block(my_news or [], earnings))
 
     sec_charts = ("<h2 id='charts'>S&amp;P 500 intraday</h2><img src='cid:chart'>"
@@ -3130,6 +3598,10 @@ def main():
     analysts = get_analysts(watch[:24])
     earnings = get_earnings(watch)
     my_news = portfolio_news()
+    tracked_syms = sorted(set(list(HOLDINGS) + list(WATCHLIST)))
+    today_cal = earnings_calendar_day(dt.datetime.now(MARKET_TZ).date())
+    e_results = merge_earnings_sources(tracked_syms, today_cal)
+    e_coverage = earnings_coverage(e_results)
     fundamentals = get_fundamentals(watch)
     earn_hist = get_earnings_history(watch)
     shorted = heavily_shorted(fundamentals)
@@ -3137,19 +3609,26 @@ def main():
     today_key = dt.datetime.now(MARKET_TZ).date().isoformat()
     prev_today = prev_state if prev_state.get("date") == today_key else {}
 
-    q_tickers = extract_tickers(QUESTION, QUESTION_TICKERS) if (
-        QUESTION or QUESTION_TICKERS) else []
-    q_context = question_context(q_tickers) if q_tickers else ""
+    # Two independent inputs. The question field gets an answer, the ticker
+    # field gets a per name write up. Filling one must never suppress the other.
+    q_tickers = extract_tickers(QUESTION, "") if QUESTION else []
+    d_tickers = extract_tickers("", QUESTION_TICKERS) if QUESTION_TICKERS else []
+    all_q = list(dict.fromkeys(q_tickers + d_tickers))
+    q_context = question_context(all_q) if all_q else ""
     if QUESTION:
         print(f"question: {QUESTION[:80]}")
-        print(f"tickers pulled: {', '.join(q_tickers) or 'none'}")
+        print(f"  tickers from question: {', '.join(q_tickers) or 'none'}")
+    if d_tickers:
+        print(f"deep dive tickers: {', '.join(d_tickers)}")
 
     tech = index_technicals(CHART_SYMBOL)
     payload = summary_payload(quotes, fng, movers, near_ma, cal_today,
                               cal_ahead, news, port, analysts, earnings,
                               prev_today, tech, my_news, fundamentals,
                               earn_hist, shorted, intraday, health,
-                              sentiment, buzz, verified, q_context)
+                              sentiment, buzz, verified, q_context,
+                              d_tickers, e_results, e_coverage, today_cal,
+                              tracked_syms)
     brief, ai_used = ai_brief(payload, [chart, daily], quotes, fng, movers,
                               cal_today, port)
 
@@ -3159,7 +3638,8 @@ def main():
     html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                       near_ma, brief, ai_used, port, analysts, earnings,
                       my_news, fundamentals, earn_hist, shorted, health,
-                      sentiment, buzz, q_tickers)
+                      sentiment, buzz, q_tickers, d_tickers, e_results,
+                      e_coverage, today_cal, tracked_syms)
 
     spx = quotes.get("SPY", {}).get("pct", 0)
     qqq = quotes.get("QQQ", {}).get("pct", 0)
@@ -3181,6 +3661,8 @@ def main():
                               movers, near_ma, brief, ai_used, port, analysts,
                               earnings, my_news, fundamentals, earn_hist,
                               shorted, health, sentiment, buzz, q_tickers,
+                              d_tickers, e_results, e_coverage, today_cal,
+                              tracked_syms,
                               for_pdf=True)
         pdf = build_pdf(pdf_html, {"heatmap": heat, "chart": chart,
                                    "daily": daily})
@@ -3195,7 +3677,8 @@ def main():
     pdf_html = build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
                           near_ma, brief, ai_used, port, analysts, earnings,
                           my_news, fundamentals, earn_hist, shorted, health,
-                          sentiment, buzz, q_tickers, for_pdf=True)
+                          sentiment, buzz, q_tickers, d_tickers, e_results,
+                          e_coverage, today_cal, tracked_syms, for_pdf=True)
     pdf = build_pdf(pdf_html, images)
     stamp = dt.datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
     send_email(subject, html, images, pdf, f"market-report-{stamp}.pdf")
