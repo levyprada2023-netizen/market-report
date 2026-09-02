@@ -1975,15 +1975,44 @@ def sec_earnings_release(sym, back_days=6):
             txt = re.sub(r"\s+", " ", txt).strip()
             if len(txt) < 900 or not re.search(r"\d", txt):
                 continue
-            guide = [m.group(0).strip() for m in re.finditer(
-                r"[^.]{0,180}\b(guidance|outlook|raising|lowering|expects to)"
-                r"\b[^.]{0,180}\.", txt[:14000], re.I)][:6]
+            # split on sentence ends only, never on the decimal point inside
+            # a figure, or "$192.0 billion" becomes two useless fragments
+            sentences = re.split(r"(?<=[a-z0-9%\)])\.\s+(?=[A-Z(])",
+                                 txt[:14000])
+            guide = []
+            for x in sentences:
+                x = x.strip()
+                # skip the EDGAR document header that precedes the release
+                x = re.sub(r"^EX-\d+\.?\d*\s+\d+\s+\S+\.htm\s+EX-\d+\.?\d*"
+                           r"\s+Document\s+Exhibit\s+\d+\.?\d*\s*", "", x, flags=re.I)
+                if len(x) < 30 or x.lower().startswith("ex-"):
+                    continue
+                if re.search(r"\b(guidance|outlook|raising|lowering|"
+                             r"expects?|forecast)\b", x, re.I):
+                    guide.append(x)
+                if len(guide) >= 6:
+                    break
+
+            # headline figures for the table, straight from the release
+            def grab(pattern):
+                m2 = re.search(pattern, txt[:6000], re.I)
+                return m2.group(1).strip() if m2 else None
+
+            metrics = {
+                "revenue": grab(r"revenue of \$?([\d.,]+\s*(?:billion|million))"),
+                "eps": grab(r"(?:diluted )?(?:earnings per share|EPS)[^$]{0,40}"
+                            r"\$([\d.]+)"),
+                "non_gaap_eps": grab(r"non-?GAAP diluted EPS of \$([\d.]+)"),
+            }
             return {
                 "filed": filed,
                 "days_ago": (today - filed).days,
                 "url": f"{base}/{name}",
-                "text": txt[:5000],
+                "text": re.sub(r"^EX-\d+\.?\d*\s+\d+\s+\S+\.htm\s+EX-\d+\.?\d*"
+                               r"\s+Document\s+Exhibit\s+\d+\.?\d*\s*", "",
+                               txt, flags=re.I)[:5000],
                 "guidance": guide,
+                "metrics": {k: v for k, v in metrics.items() if v},
             }
     return None
 
@@ -2043,11 +2072,23 @@ def merge_earnings_sources(symbols, today_cal, back_days=6):
     vendor = earnings_results(symbols, back_days=back_days)
     today = dt.datetime.now(MARKET_TZ).date()
 
-    # anything scheduled today, plus anything the vendor already has
+    # Candidates come from three places, because no single one is complete.
+    # A company reporting after the close is not on today's calendar the next
+    # morning, and the vendor can lag it by more than a day, so the recent
+    # calendar days are swept as well.
     candidates = set(vendor)
-    for sym in symbols:
-        if today_cal.get(sym.split(".")[0]):
-            candidates.add(sym)
+    cal_by_sym = dict(today_cal)
+    for back in range(0, back_days + 1):
+        day = today - dt.timedelta(days=back)
+        if day.weekday() >= 5:
+            continue
+        day_cal = today_cal if back == 0 else earnings_calendar_day(day)
+        for base, info in day_cal.items():
+            for sym in symbols:
+                if sym.split(".")[0] == base:
+                    candidates.add(sym)
+                    cal_by_sym.setdefault(base, info)
+    today_cal = cal_by_sym
 
     out = {}
     for sym in sorted(candidates):
@@ -3163,17 +3204,50 @@ def results_block(results, coverage, today_cal, tracked):
             if not r.get("reported"):
                 continue
             has_eps = r.get("eps") is not None
+            fil = r.get("filing") or {}
+            met = fil.get("metrics") or {}
             verdict = ("BEAT" if r.get("beat") else "MISS") if has_eps else "FILED"
+            if not has_eps and met.get("eps") and r.get("estimate_str"):
+                try:
+                    got = float(met["eps"])
+                    exp = float(str(r["estimate_str"]).replace("$", "")
+                                .replace("(", "-").replace(")", ""))
+                    verdict = "BEAT" if got > exp else "MISS"
+                    r["beat"] = got > exp
+                    has_eps = True
+                    r["eps"] = got
+                    r["estimate"] = exp
+                    r["surprise_pct"] = (got / exp - 1) * 100 if exp else 0.0
+                except Exception:
+                    pass
             col = ("#30363d" if not has_eps
                    else "#0b6e3d" if r["beat"] else "#8c1f18")
-            heads = "".join(
+            extra = ""
+            if met.get("revenue"):
+                extra += (f"<div class='small' style='margin-top:3px'>"
+                          f"Revenue ${met['revenue']}"
+                          + (f", non GAAP EPS ${met['non_gaap_eps']}"
+                             if met.get("non_gaap_eps") else "") + "</div>")
+            shown = 0
+            for g in (fil.get("guidance") or []):
+                if re.search(r"\bprovides guidance\b|announces financial "
+                             r"results|forward-looking", g, re.I):
+                    continue
+                if not re.search(r"\b(raising|raised|lowering|lowered|"
+                                 r"guidance of|outlook (?:to|by)|now expects?|"
+                                 r"expects? full)\b", g, re.I):
+                    continue
+                extra += (f"<div class='small' style='margin-top:3px;"
+                          f"color:#f0b429'>{g[:240]}</div>")
+                shown += 1
+                if shown >= 2:
+                    break
+            if fil.get("url"):
+                extra += (f"<div class='small' style='margin-top:3px'>"
+                          f"<a href='{fil['url']}'>Read the release</a></div>")
+            heads = extra + "".join(
                 f"<div class='small' style='margin-top:3px'>{h}</div>"
                 for h in coverage.get(r["sym"], []))
-            if r.get("filing", {}).get("guidance"):
-                heads += "".join(
-                    f"<div class='small' style='margin-top:3px;color:#f0b429'>"
-                    f"{g[:160]}</div>"
-                    for g in r["filing"]["guidance"][:3])
             d_ago = r.get("days_ago", 0)
             when = ("today" if d_ago == 0 else "yesterday" if d_ago == 1
                     else f"{d_ago} days ago")
@@ -3241,16 +3315,20 @@ def earnings_block(earnings):
             return f"{n} day{'s' if n != 1 else ''} ago"
         return f"in {e['days']} day{'s' if e['days'] != 1 else ''}"
 
+    upcoming = [e for e in earnings if not e.get("reported")]
+    if not upcoming:
+        return ""
     rows = "".join(
         f"<tr><td><b>{e['sym']}</b>"
         + ("<span class='small'> held</span>" if e["held"] else "")
         + f"</td><td>{e['date'].strftime('%a %b %d')}</td>"
-        f"<td class='num small'>{when(e)}</td>"
-        f"<td class='small'>{'reported' if e['reported'] else 'upcoming'}</td></tr>"
-        for e in earnings)
-    return ("<h2 id='earnings'>Earnings, just reported and coming up</h2><table>"
-            "<tr><th>Ticker</th><th>Date</th><th class='num'>When</th>"
-            "<th>Status</th></tr>" + rows + "</table>")
+        f"<td class='num small'>{when(e)}</td></tr>"
+        for e in upcoming)
+    return ("<h2 id='earnings'>Earnings coming up</h2><table>"
+            "<tr><th>Ticker</th><th>Date</th><th class='num'>When</th></tr>"
+            + rows + "</table>"
+            "<p class='small'>Anything already reported appears above with its "
+            "actual figures instead.</p>")
 
 
 def match_link(title, news):
