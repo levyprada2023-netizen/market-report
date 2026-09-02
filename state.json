@@ -1,8 +1,8 @@
 {
- "date": "2026-09-01",
+ "date": "2026-09-02",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-01T16:19-04:00",
- "summary": "The S&P 500 fell to 7,631.47, down 0.71%, as a one-two punch hit markets: U.S. strikes on Iranian targets in the Strait of Hormuz sent crude oil up 5.89% to 90.81 a barrel, stoking fears that higher energy costs will push inflation back up, which would force the Federal Reserve to keep interest rates high longer. The VIX, which measures how much fear is priced into the market, jumped 9.18% to 16.29. Gold fell 1.23% and Bitcoin dropped 1.53%, so there was no safe haven trade today. The big event this week is Friday's jobs report, which will tell us whether the economy is strong enough to absorb higher oil prices.",
+ "sent_at": "2026-09-02T00:22-04:00",
+ "summary": "The S&P 500 fell to 7,631 today, down 0.71%, as fresh US strikes on Iran pushed oil prices higher and sent bond yields up, which makes future corporate profits worth less in today's dollars. The VIX, which measures how much fear is priced into the market, jumped 9.5% to 16.34, a sign investors grew notably more nervous. Japan's Nikkei dropped 2.90% and Korea fell 3.61%, with global markets broadly selling off on the same inflation fears. The big jobs report, known as Non-Farm Payrolls, comes Friday and will be the next thing to move markets.",
  "spx": 7631.47021484375
 }
