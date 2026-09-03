@@ -169,6 +169,15 @@ KO MCD SPY QQQ
 """.split()
 AI_MODEL = "claude-sonnet-4-6"
 
+# Ceiling, not a target. You are billed on tokens actually produced, so this
+# only has to be high enough that a reply is never cut off mid sentence.
+# The word limits in the prompt are what keep the reply short.
+AI_MAX_TOKENS = 5000
+
+# Published rates per million tokens, used only to print what each run cost.
+AI_PRICE_IN = 3.00
+AI_PRICE_OUT = 15.00
+
 # Optional question typed into the Run workflow box. Empty on a plain run.
 QUESTION = os.environ.get("REPORT_QUESTION", "").strip()
 QUESTION_TICKERS = os.environ.get("REPORT_TICKERS", "").strip()
@@ -177,10 +186,11 @@ QUESTION_DEPTH = (os.environ.get("REPORT_DEPTH", "") or "normal").strip().lower(
 DEPTH_RULES = {
     "short": "Answer in 3 to 4 sentences, under 90 words. Get to the point.",
     "normal": "Answer in 6 to 10 sentences, under 200 words.",
-    "deep": ("Answer thoroughly, 15 to 25 sentences, up to 500 words. Use "
-             "short paragraphs separated by <br><br>. Cover the evidence, "
-             "what it implies, what argues against it, and what you would "
-             "watch next."),
+    "deep": ("Answer thoroughly but not loosely: 12 to 18 sentences, 350 "
+             "words maximum. Short paragraphs separated by <br><br>. Cover "
+             "the evidence, what it implies, what argues against it, and "
+             "what you would watch next. Depth means more substance, not "
+             "more words."),
 }
 
 # Words that look like tickers but are not, so a question does not send the
@@ -1218,9 +1228,16 @@ HOW TO WRITE. This matters as much as what you say.
 - Say what a number means, not just what it is. "58 percent of stocks are
   above their 50 day average, so a bit more than half are doing well" beats
   "breadth is 58 percent".
-- Be brief. Respect the word limits below. Cut every sentence that does not
-  tell him something he can use.
-- No filler openers. Start with the point.
+- Be brief. The word limits below are hard limits, not suggestions. Count as
+  you go and stop when you reach one. Going over is a failure, not thorough.
+- TOTAL BUDGET across every field combined: 1000 words. If answering his
+  question fully needs more room, shorten the routine sections rather than
+  exceeding the total.
+- Cut every sentence that does not tell him something he can use. If a
+  section has nothing worth saying today, one sentence saying so beats five
+  saying nothing.
+- No filler openers, no restating the question back, no summarising what you
+  are about to say. Start with the point.
 
 Return ONLY a JSON object, no markdown fences, with these keys:
 
@@ -1319,18 +1336,75 @@ out and describe the direction instead.
 Do not use hyphens as punctuation anywhere in your output."""
 
 
+def parse_ai_json(text, keys):
+    """Parse the model's JSON, salvaging a truncated reply rather than losing
+    the whole report to it.
+
+    A reply that runs into the token ceiling ends mid string, which makes the
+    JSON invalid. Rather than fall back to plain text, the closing quotes and
+    braces are repaired, and failing that each field is pulled out on its own
+    so whatever did arrive is still used.
+    """
+    text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.M).strip()
+
+    try:
+        return json.loads(text), "clean"
+    except Exception:
+        pass
+
+    # repair: close an unterminated string, then balance the brackets
+    repaired = text
+    if repaired.count('"') % 2:
+        repaired += '"'
+    repaired = re.sub(r",\s*$", "", repaired)
+    repaired += "]" * max(0, repaired.count("[") - repaired.count("]"))
+    repaired += "}" * max(0, repaired.count("{") - repaired.count("}"))
+    try:
+        return json.loads(repaired), "repaired"
+    except Exception:
+        pass
+
+    # last resort: lift each field out individually
+    out = {}
+    for k in keys:
+        m2 = re.search(rf'"{k}"\s*:\s*"((?:[^"\\]|\\.)*)', text, re.S)
+        if m2:
+            try:
+                out[k] = json.loads('"' + m2.group(1) + '"')
+            except Exception:
+                out[k] = m2.group(1)
+    picks = re.findall(
+        r'\{\s*"title"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"why"\s*:\s*"'
+        r'((?:[^"\\]|\\.)*)"(?:\s*,\s*"tone"\s*:\s*"([^"]*)")?'
+        r'(?:\s*,\s*"tickers"\s*:\s*"([^"]*)")?', text, re.S)
+    if picks:
+        out["news_picks"] = [
+            {"title": a, "why": b, "tone": c or "neutral", "tickers": d or ""}
+            for a, b, c, d in picks]
+    return (out, "rescued") if out else (None, "failed")
+
+
 def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
     """One API call returning summary, chart read, news picks and considerations."""
     blank = {
         "summary": fallback_summary(quotes, fng, movers, cal_today, port),
         "portfolio_analysis": "", "technical_analysis": "",
         "macro_analysis": "", "health_analysis": "", "answer": "",
+        "_why": "", "_usage": None,
         "ticker_notes": [],
         "lean": "", "lean_reason": "", "news_picks": [],
     }
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
+        print("ANTHROPIC_API_KEY is not set in this environment",
+              file=sys.stderr)
+        blank["_why"] = ("No Anthropic key reached the script, so no analysis "
+                         "was written. Check the ANTHROPIC_API_KEY secret and "
+                         "that the workflow passes it in its env block.")
         return blank, False
+    if not key.startswith("sk-ant-"):
+        print(f"ANTHROPIC_API_KEY looks wrong, starts with "
+              f"{key[:7]!r}", file=sys.stderr)
 
     content = []
     for img in images:
@@ -1342,27 +1416,90 @@ def ai_brief(payload, images, quotes, fng, movers, cal_today, port):
     content.append({"type": "text",
                     "text": f"{AI_SCHEMA}\n\nMARKET DATA:\n{payload}"})
 
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": key,
+                         "anthropic-version": "2023-06-01",
+                         "content-type": "application/json"},
+                json={"model": AI_MODEL, "max_tokens": AI_MAX_TOKENS,
+                      "messages": [{"role": "user", "content": content}]},
+                timeout=180)
+            # rate limits and server errors are worth another go, a rejected
+            # key or an empty balance is not
+            if r.status_code in (429, 500, 502, 503, 529):
+                wait = 5 * (attempt + 1)
+                print(f"AI call got {r.status_code}, retrying in {wait}s",
+                      file=sys.stderr)
+                last_err = Exception(f"HTTP {r.status_code}: {r.text[:200]}")
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            body = r.json()
+            text = "".join(b.get("text", "") for b in body.get("content", [])
+                           if b.get("type") == "text").strip()
+            stop = body.get("stop_reason")
+            usage = body.get("usage") or {}
+            tin = usage.get("input_tokens", 0)
+            tout = usage.get("output_tokens", 0)
+            cost = tin / 1e6 * AI_PRICE_IN + tout / 1e6 * AI_PRICE_OUT
+            print(f"AI usage: {tin:,} in, {tout:,} out, ${cost:.4f} this run, "
+                  f"stop={stop}", file=sys.stderr)
+            if tout > AI_MAX_TOKENS * 0.85:
+                print("AI reply came close to the ceiling, the prompt word "
+                      "limits are being ignored", file=sys.stderr)
+
+            data, how = parse_ai_json(
+                text, [k for k in blank if not k.startswith("_")])
+            if data is None:
+                raise ValueError(f"could not parse the reply "
+                                 f"(stop_reason={stop})")
+            if how != "clean":
+                print(f"AI reply was {how} (stop_reason={stop})",
+                      file=sys.stderr)
+            out = dict(blank)
+            for k in blank:
+                if data.get(k):
+                    out[k] = data[k]
+            out["_usage"] = {"in": tin, "out": tout, "cost": cost}
+            if stop == "max_tokens":
+                out["_why"] = ("The analysis ran past the length limit and "
+                               "was cut off, so some sections may be short.")
+            return out, True
+        except Exception as e:
+            last_err = e
+            if attempt < 2 and isinstance(e, (requests.Timeout,
+                                              requests.ConnectionError)):
+                print(f"AI call errored, retrying: {e}", file=sys.stderr)
+                time.sleep(5 * (attempt + 1))
+                continue
+            break
+
     try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": key,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": AI_MODEL, "max_tokens": 4000,
-                  "messages": [{"role": "user", "content": content}]},
-            timeout=120)
-        r.raise_for_status()
-        text = "".join(b.get("text", "") for b in r.json()["content"]
-                       if b.get("type") == "text").strip()
-        text = re.sub(r"^```(?:json)?|```$", "", text, flags=re.M).strip()
-        data = json.loads(text)
-        out = dict(blank)
-        for k in blank:
-            if data.get(k):
-                out[k] = data[k]
-        return out, True
+        raise last_err if last_err else Exception("no response")
     except Exception as e:
-        print(f"ai brief failed, using fallback: {e}", file=sys.stderr)
+        detail = str(e)
+        try:
+            if hasattr(r, "status_code"):
+                detail = f"HTTP {r.status_code}: {r.text[:300]}"
+        except Exception:
+            pass
+        print(f"ai brief failed, using fallback: {detail}", file=sys.stderr)
+        hint = ""
+        low = detail.lower()
+        if "401" in detail or "authentication" in low:
+            hint = " The key was rejected, so it is wrong or has been revoked."
+        elif "400" in detail and "credit" in low:
+            hint = " The account is out of credits. Top up in the console."
+        elif "429" in detail:
+            hint = " Rate limited. Try again in a minute."
+        elif "json" in low or "expecting value" in low:
+            hint = (" The model replied but the JSON could not be parsed, so "
+                    "the sections were dropped.")
+        blank["_why"] = ("The analysis call failed, so this report fell back "
+                         f"to plain generated text. {detail[:200]}{hint}")
         return blank, False
 
 
@@ -3490,8 +3627,16 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
               f"{nav_bar() if for_pdf else ''}{lede}"
               f"{lean_badge(brief.get('lean'), brief.get('lean_reason'))}"
               f"<div class='small' style='margin-bottom:4px'>"
-              f"{'Analysis written by Claude. Not advice, and it does not know your plan or tax position.' if ai_used else 'Auto generated summary. Add an Anthropic key for full analysis.'}"
-              f"</div>"
+              + (f"<div class='small' style='margin-bottom:4px'>Analysis "
+                 f"written by Claude. Not advice, and it does not know your "
+                 f"plan or tax position.</div>" if ai_used else
+                 f"<div style=\"background:#3d1d1a;color:#ffd7d3;border-left:"
+                 f"3px solid #f85149;border-radius:6px;padding:10px 14px;"
+                 f"margin:8px 0;font-size:13px\"><b>No AI analysis in this "
+                 f"report.</b><br>{brief.get('_why') or 'Reason unknown.'}"
+                 f"<br>The summary above was generated by plain code, not by "
+                 f"Claude. Your question and ticker sections are missing for "
+                 f"the same reason.</div>")
               + answer_box(QUESTION, brief.get("answer"), q_tickers or [])
               + ticker_notes_block(brief.get("ticker_notes"), d_tickers or []))
 
@@ -3568,7 +3713,11 @@ def build_html(slot, quotes, news, cal_today, cal_ahead, fng, movers,
             f"{header}{sec_portfolio}{sec_charts}{sec_macro}"
             f"{rule}{sec_market}{rule}{all_news_block(news)}"
             f"<p class='small'>Generated automatically. Prices and analyst data from "
-            f"Yahoo Finance, sentiment from CNN, calendar from Forex Factory.</p>"
+            f"Yahoo Finance, sentiment from CNN, calendar from Forex Factory."
+            + ((f" Analysis used {brief['_usage']['in']:,} input and "
+                f"{brief['_usage']['out']:,} output tokens, about "
+                f"${brief['_usage']['cost']:.3f} for this report.")
+               if brief.get("_usage") else "") + "</p>"
             f"</div></body></html>")
 
 
