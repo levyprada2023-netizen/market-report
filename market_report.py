@@ -1711,8 +1711,10 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
         parts.append(
             f"PORTFOLIO: total {CURRENCY} {port['value']:,.0f}, today "
             f"{port['day_pl']:+,.0f} ({port['day_pct']:+.2f}%). "
-            + ("Total gain since purchase " + format(port["total_gain"], "+,.0f") + ". "
-               if port["total_gain"] is not None else "")
+            + ((f"Cost basis {CURRENCY} {port['cost_basis']:,.0f}, gain since "
+                f"purchase {port['total_gain']:+,.0f} "
+                f"({port['total_gain'] / port['cost_basis'] * 100:+.1f}%). ")
+               if port.get("cost_basis") else "")
             + f"{len(port['rows'])} positions. Top 5 are {top5:.0f}% of the book.")
         if len(port.get("accounts", [])) > 1:
             parts.append("By account, each in its own currency: " + "; ".join(
@@ -1724,6 +1726,8 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             f"{r['sym']} {r['value'] / total * 100:.1f}% of book, "
             f"{CURRENCY} {r['value']:,.0f}, today {r['pct']:+.2f}% "
             f"({r['moved']:+,.0f})"
+            + (f", avg cost {r['avg_cost']:,.2f} vs price {r['price']:,.2f}"
+               if r.get("avg_cost") else "")
             + (f", since purchase {r['gain_pct']:+.1f}%"
                if r.get("gain_pct") is not None else "")
             for r in by_weight))
@@ -2369,6 +2373,8 @@ def portfolio_view(quotes):
         rows.append({
             "sym": sym, "shares": shares, "price": q["last"],
             "pct": q["pct"], "cur": cur,
+            "avg_cost": book,
+            "book_value": (native_cost * fx) if native_cost is not None else None,
             "value": native_val * fx,          # reporting currency
             "moved": native_moved * fx,
             "native_value": native_val,
@@ -2399,6 +2405,7 @@ def portfolio_view(quotes):
             "value": b["value"],
             "day_pl": b["moved"],
             "day_pct": (b["moved"] / prev * 100) if prev else 0.0,
+            "cost": b["cost"] if b["has_cost"] else None,
             "gain": (b["value"] - b["cost"]) if b["has_cost"] else None,
             "gain_pct": ((b["value"] / b["cost"] - 1) * 100
                          if b["has_cost"] and b["cost"] else None),
@@ -2412,6 +2419,7 @@ def portfolio_view(quotes):
         "day_pl": day_pl,
         "day_pct": (day_pl / prev_value * 100) if prev_value else 0.0,
         "total_gain": (value - cost) if cost else None,
+        "cost_basis": cost or None,
         "missing": missing,
         "options": OPTIONS,
         "source": POSITIONS_SOURCE,
@@ -3123,6 +3131,8 @@ def portfolio_block(port, ai_note):
         arows = "".join(
             f"<tr><td><b>{a['cur']}</b> account</td>"
             f"<td class='num small'>{a['positions']}</td>"
+            f"<td class='num small'>"
+            f"{format(a['cost'], ',.0f') if a.get('cost') else '-'}</td>"
             f"<td class='num'>{a['cur']} {a['value']:,.0f}</td>"
             f"<td class='num {cls(a['day_pl'])}'>{a['day_pl']:+,.0f}</td>"
             f"<td class='num {cls(a['day_pct'])}'>{a['day_pct']:+.2f}%</td>"
@@ -3133,7 +3143,8 @@ def portfolio_block(port, ai_note):
             f"</td></tr>" for a in port["accounts"])
         acc = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
                "font-weight:600'>By account, each in its own currency</p><table>"
-               "<tr><th>Account</th><th class='num'>Pos</th><th class='num'>Value</th>"
+               "<tr><th>Account</th><th class='num'>Pos</th>"
+               "<th class='num'>Cost basis</th><th class='num'>Value</th>"
                "<th class='num'>Day</th><th class='num'>Day %</th>"
                "<th class='num'>Gain</th><th class='num'>Gain %</th></tr>"
                + arows + "</table>"
@@ -3147,8 +3158,12 @@ def portfolio_block(port, ai_note):
         f"{'' if r['cur'] == CURRENCY else chr(32) + '<span class=small>' + r['cur'] + '</span>'}"
         f"</td>"
         f"<td class='num'>{r['shares']:,.0f}</td>"
+        f"<td class='num small'>"
+        f"{format(r['avg_cost'], ',.2f') if r.get('avg_cost') else '-'}</td>"
         f"<td class='num'>{r['price']:,.2f}</td>"
         f"<td class='num {cls(r['pct'])}'>{r['pct']:+.2f}%</td>"
+        f"<td class='num small'>"
+        f"{format(r['book_value'], ',.0f') if r.get('book_value') else '-'}</td>"
         f"<td class='num'>{r['value']:,.0f}</td>"
         f"<td class='num {cls(r['moved'])}'>{r['moved']:+,.0f}</td>"
         f"<td class='num {cls(r['gain'] or 0)}'>"
@@ -3160,9 +3175,16 @@ def portfolio_block(port, ai_note):
         + "</tr>"
         for r in sorted(port["rows"], key=lambda r: -abs(r["moved"])))
 
-    total_gain = ("<div class='small'>Total gain since purchase: "
-                  f"{port['total_gain']:+,.0f} {CURRENCY} across all accounts</div>"
-                  if port["total_gain"] is not None else "")
+    if port.get("cost_basis"):
+        pct = port["total_gain"] / port["cost_basis"] * 100
+        total_gain = (
+            f"<div class='small'>Cost basis {CURRENCY} "
+            f"{port['cost_basis']:,.0f}, now worth "
+            f"{CURRENCY} {port['cost_basis'] + port['total_gain']:,.0f}, "
+            f"a gain of {port['total_gain']:+,.0f} ({pct:+.1f}%) across all "
+            f"accounts</div>")
+    else:
+        total_gain = ""
 
     opts = ""
     if port.get("options"):
@@ -3194,8 +3216,10 @@ def portfolio_block(port, ai_note):
             f"{total_gain}{acc}"
             f"<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
             f"font-weight:600'>Positions, by size of today's move</p><table>"
-            f"<tr><th>Ticker</th><th class='num'>Shares</th><th class='num'>Close</th>"
-            f"<th class='num'>Day %</th><th class='num'>Value {CURRENCY}</th>"
+            f"<tr><th>Ticker</th><th class='num'>Shares</th>"
+            f"<th class='num'>Avg cost</th><th class='num'>Close</th>"
+            f"<th class='num'>Day %</th>"
+            f"<th class='num'>Cost basis</th><th class='num'>Value {CURRENCY}</th>"
             f"<th class='num'>Day P/L</th><th class='num'>Gain {CURRENCY}</th>"
             f"<th class='num'>Gain %</th>"
             f"<th class='num'>{session_label().title()}</th></tr>"
