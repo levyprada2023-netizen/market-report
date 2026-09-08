@@ -929,21 +929,48 @@ def market_health():
     except Exception as e:
         print(f"breadth failed: {e}", file=sys.stderr)
 
+    # Each figure is fetched independently. One symbol with a short history
+    # used to abort the whole block partway through, which left some keys set
+    # and others missing and crashed the report later on.
     try:
         h = yf.download(list(HEALTH_TICKERS), period="6mo", interval="1d",
                         progress=False, auto_adjust=False, threads=True)["Close"]
-        def move(sym, days):
-            ser = h[sym].dropna()
-            return (float(ser.iloc[-1]) / float(ser.iloc[-1 - days]) - 1) * 100
-        out["rsp_spy_day"] = move("RSP", 1) - move("SPY", 1)
-        out["rsp_spy_month"] = move("RSP", 21) - move("SPY", 21)
-        out["rsp_spy_qtr"] = move("RSP", 63) - move("SPY", 63)
-        for sym in ("^SKEW", "HYG", "^VIX"):
-            ser = h[sym].dropna()
-            out[sym] = float(ser.iloc[-1])
-            out[sym + "_chg"] = (float(ser.iloc[-1]) / float(ser.iloc[-2]) - 1) * 100
     except Exception as e:
-        print(f"health tickers failed: {e}", file=sys.stderr)
+        print(f"health tickers download failed: {e}", file=sys.stderr)
+        h = None
+
+    if h is not None:
+        def move(sym, days):
+            """Percent move over a window, None if the history is too short."""
+            try:
+                ser = h[sym].dropna()
+            except Exception:
+                return None
+            if len(ser) < days + 1:
+                return None
+            try:
+                return (float(ser.iloc[-1]) / float(ser.iloc[-1 - days]) - 1) * 100
+            except Exception:
+                return None
+
+        for label, days in (("rsp_spy_day", 1), ("rsp_spy_month", 21),
+                            ("rsp_spy_qtr", 63)):
+            a, b = move("RSP", days), move("SPY", days)
+            if a is not None and b is not None:
+                out[label] = a - b
+            else:
+                print(f"skipping {label}, not enough history", file=sys.stderr)
+
+        for sym in ("^SKEW", "HYG", "^VIX"):
+            try:
+                ser = h[sym].dropna()
+                if len(ser) < 2:
+                    raise ValueError("not enough history")
+                out[sym] = float(ser.iloc[-1])
+                out[sym + "_chg"] = (float(ser.iloc[-1])
+                                     / float(ser.iloc[-2]) - 1) * 100
+            except Exception as e:
+                print(f"health ticker {sym} unavailable: {e}", file=sys.stderr)
 
     out["pc_index"] = put_call(PC_INDEX)
     out["pc_equity"] = put_call(PC_EQUITY)
@@ -1561,6 +1588,18 @@ def index_technicals(symbol="^GSPC"):
         return None
 
 
+def risk_line(h):
+    """Risk pricing sentence, built only from the figures that arrived."""
+    bits = []
+    if h.get("^SKEW") is not None and h.get("^SKEW_chg") is not None:
+        bits.append(f"CBOE SKEW {h['^SKEW']:.1f} ({h['^SKEW_chg']:+.1f}%)")
+    if h.get("^VIX") is not None and h.get("^VIX_chg") is not None:
+        bits.append(f"VIX {h['^VIX']:.2f} ({h['^VIX_chg']:+.1f}%)")
+    if h.get("HYG_chg") is not None:
+        bits.append(f"HYG high yield credit {h['HYG_chg']:+.2f}%")
+    return (".\nRisk pricing: " + ", ".join(bits) + ".") if bits else "."
+
+
 def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     news, port, analysts, earnings, prev_state, tech=None,
                     my_news=None, fundamentals=None, earn_hist=None,
@@ -1630,7 +1669,11 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                     f"{i['today_volume'] / i['prior_volume'] * 100:.0f}% of the "
                     "prior session's total")
         parts.append("\n".join(block))
-    if health and health.get("counted"):
+    breadth_ok = health and all(
+        health.get(k) is not None for k in
+        ("counted", "advancers", "decliners", "above50", "above200",
+         "new_highs", "new_lows", "median_move"))
+    if breadth_ok:
         h = health
         parts.append(
             "MARKET HEALTH, measured across all "
@@ -1641,11 +1684,16 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
             f"{h['above50']:.0f}% above their 50 day average; "
             f"{h['above200']:.0f}% above their 200 day; "
             f"{h['new_highs']} new 52 week highs vs {h['new_lows']} new lows.\n"
-            + (f"Equal weight vs cap weight (RSP minus SPY): today "
-               f"{h['rsp_spy_day']:+.2f}%, past month {h['rsp_spy_month']:+.2f}%, "
-               f"past quarter {h['rsp_spy_qtr']:+.2f}%. Negative means the "
-               "average stock is lagging the megacaps.\n"
-               if h.get("rsp_spy_month") is not None else "")
+            + (("Equal weight vs cap weight (RSP minus SPY): "
+                + ", ".join(
+                    f"{lab} {h[k]:+.2f}%" for k, lab in
+                    (("rsp_spy_day", "today"), ("rsp_spy_month", "past month"),
+                     ("rsp_spy_qtr", "past quarter"))
+                    if h.get(k) is not None)
+                + ". Negative means the average stock is lagging the "
+                  "megacaps.\n")
+               if any(h.get(k) is not None for k in
+                      ("rsp_spy_day", "rsp_spy_month", "rsp_spy_qtr")) else "")
             + (f"Breadth reading: {breadth_verdict(h['above50'], h['above200'])}\n"
                if h.get("above50") is not None else "")
             + (("Valuation with full history: Shiller CAPE "
@@ -1673,10 +1721,7 @@ def summary_payload(quotes, fng, movers, near_ma, cal_today, cal_ahead,
                 "Index options run higher because they are hedges, single "
                 "stock options run lower because they are speculation")
                if h.get("pc_equity") else "")
-            + (f".\nRisk pricing: CBOE SKEW {h['^SKEW']:.1f} "
-               f"({h['^SKEW_chg']:+.1f}%), VIX {h['^VIX']:.2f} "
-               f"({h['^VIX_chg']:+.1f}%), HYG high yield credit "
-               f"{h['HYG_chg']:+.2f}%." if h.get("^SKEW") else ""))
+            + risk_line(h))
     if sentiment:
         base = next(iter(sentiment.values()))["baseline"]
         ranked = sorted(sentiment.items(), key=lambda kv: -kv[1]["vs_crowd"])
@@ -2810,7 +2855,9 @@ def health_block(h):
                 f"<td class='small'>{note}</td></tr>")
 
     breadth = ""
-    if h.get("counted"):
+    breadth_keys = ("counted", "advancers", "decliners", "above50",
+                    "above200", "new_highs", "new_lows", "median_move")
+    if all(h.get(k) is not None for k in breadth_keys):
         ad = h.get("ad_ratio")
         breadth = (
             "<p class='small' style='margin:12px 0 2px;color:#e6edf3;"
@@ -2841,13 +2888,16 @@ def health_block(h):
               + breadth_verdict(h["above50"], h["above200"]) + "</p>")
 
     lead = ""
-    if h.get("rsp_spy_month") is not None:
-        d, mo, q = h["rsp_spy_day"], h["rsp_spy_month"], h["rsp_spy_qtr"]
+    lead_rows = "".join(
+        row(lab, f"<span class='{cls(h[k])}'>{h[k]:+.2f}%</span>", "")
+        for k, lab in (("rsp_spy_day", "Today"),
+                       ("rsp_spy_month", "Past month"),
+                       ("rsp_spy_qtr", "Past quarter"))
+        if h.get(k) is not None)
+    if lead_rows:
         lead = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
                 "font-weight:600'>Equal weight versus cap weight</p><table>"
-                + row("Today", f"<span class='{cls(d)}'>{d:+.2f}%</span>", "")
-                + row("Past month", f"<span class='{cls(mo)}'>{mo:+.2f}%</span>", "")
-                + row("Past quarter", f"<span class='{cls(q)}'>{q:+.2f}%</span>", "")
+                + lead_rows
                 + "</table><p class='small'>RSP against SPY. Negative means the "
                   "average stock is lagging the megacaps, so the index is being "
                   "carried by a narrowing group.</p>")
@@ -2897,20 +2947,24 @@ def health_block(h):
                 "publishes its daily ratios on a free endpoint. Directionally "
                 "sound, not identical to the official CBOE series.</p>")
 
-    risk = ""
-    if h.get("^SKEW"):
-        risk = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
-                "font-weight:600'>Risk pricing</p><table>"
-                + row("CBOE SKEW", f"{h['^SKEW']:.1f}",
-                      "above 145 means the options market is paying up for "
-                      "crash protection")
-                + row("VIX", f"{h['^VIX']:.2f}",
-                      f"{h['^VIX_chg']:+.1f}% on the day. Below 15 is calm, "
-                      "above 25 is stressed")
-                + row("High yield credit (HYG)", f"{h['HYG']:.2f}",
-                      f"{h['HYG_chg']:+.2f}% on the day, credit usually cracks "
-                      "before equities")
-                + "</table>")
+    risk_rows = ""
+    if h.get("^SKEW") is not None:
+        risk_rows += row("CBOE SKEW", f"{h['^SKEW']:.1f}",
+                         "above 145 means the options market is paying up for "
+                         "crash protection")
+    if h.get("^VIX") is not None:
+        risk_rows += row("VIX", f"{h['^VIX']:.2f}",
+                         (f"{h['^VIX_chg']:+.1f}% on the day. " if
+                          h.get("^VIX_chg") is not None else "")
+                         + "Below 15 is calm, above 25 is stressed")
+    if h.get("HYG") is not None:
+        risk_rows += row("High yield credit (HYG)", f"{h['HYG']:.2f}",
+                         (f"{h['HYG_chg']:+.2f}% on the day, " if
+                          h.get("HYG_chg") is not None else "")
+                         + "credit usually cracks before equities")
+    risk = ("<p class='small' style='margin:16px 0 2px;color:#e6edf3;"
+            "font-weight:600'>Risk pricing</p><table>" + risk_rows + "</table>"
+            ) if risk_rows else ""
 
     return ("<h2 id='health'>Market health</h2>" + breadth + lead + val
             + pc + risk)
