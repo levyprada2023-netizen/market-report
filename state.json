@@ -1,8 +1,8 @@
 {
- "date": "2026-09-04",
+ "date": "2026-09-08",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-04T16:18-04:00",
- "summary": "The S&P 500 fell 0.38% to 7,718.60 today, but the Nasdaq 100 actually rose 0.18%, meaning tech held up while everything else slipped. The main driver was the August jobs report, which showed the economy added 162,000 jobs according to press coverage, more than triple the 55,000 forecast. That strong number made investors worry the Federal Reserve will raise interest rates rather than cut them, which pushed the 10 year Treasury yield up to 4.78%. Bitcoin dropped 1.81% to 79,802 and gold dipped slightly. Next week, Adobe reports earnings on September 10, which matters for you directly.",
- "spx": 7718.60009765625
+ "sent_at": "2026-09-08T17:02-04:00",
+ "summary": "The S&P 500 fell to 7,673.52, down 0.58%, with the Dow dropping 1.18% and health care hit hard. The bigger story is oil, which jumped to $94.06 a barrel after Houthi attacks on Saudi energy sites, reviving fears about inflation and pushing bond yields higher. The VIX, which measures how much fear is priced into the market, rose to 15.72. Friday brings CPI data, which measures how fast consumer prices are rising, and that number could move markets sharply in either direction.",
+ "spx": 7673.52001953125
 }
