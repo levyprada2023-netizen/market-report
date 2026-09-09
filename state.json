@@ -1,8 +1,8 @@
 {
- "date": "2026-09-08",
+ "date": "2026-09-09",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-08T17:02-04:00",
- "summary": "The S&P 500 fell to 7,673.52, down 0.58%, with the Dow dropping 1.18% and health care hit hard. The bigger story is oil, which jumped to $94.06 a barrel after Houthi attacks on Saudi energy sites, reviving fears about inflation and pushing bond yields higher. The VIX, which measures how much fear is priced into the market, rose to 15.72. Friday brings CPI data, which measures how fast consumer prices are rising, and that number could move markets sharply in either direction.",
- "spx": 7673.52001953125
+ "sent_at": "2026-09-09T16:16-04:00",
+ "summary": "The S&P 500 fell to 7,636 today, dropping 0.48%, as oil surged past 100 dollars a barrel after the U.S. and Iran exchanged attacks on ships near the Strait of Hormuz, a critical waterway that carries a large share of the world's oil. Higher oil prices push up inflation expectations, which pushes bond yields higher, and the 10 year Treasury yield rose to 4.84%, making stocks less attractive by comparison. Gold rose 1.14% to 4,443 and crude oil jumped 3.93% to 96.69, both signs that investors are pricing in more geopolitical risk. Friday brings CPI, the government's main inflation report, which could move markets sharply in either direction.",
+ "spx": 7636.35986328125
 }
