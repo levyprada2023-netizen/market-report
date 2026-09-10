@@ -1,8 +1,8 @@
 {
- "date": "2026-09-09",
+ "date": "2026-09-10",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-09T16:16-04:00",
- "summary": "The S&P 500 fell to 7,636 today, dropping 0.48%, as oil surged past 100 dollars a barrel after the U.S. and Iran exchanged attacks on ships near the Strait of Hormuz, a critical waterway that carries a large share of the world's oil. Higher oil prices push up inflation expectations, which pushes bond yields higher, and the 10 year Treasury yield rose to 4.84%, making stocks less attractive by comparison. Gold rose 1.14% to 4,443 and crude oil jumped 3.93% to 96.69, both signs that investors are pricing in more geopolitical risk. Friday brings CPI, the government's main inflation report, which could move markets sharply in either direction.",
- "spx": 7636.35986328125
+ "sent_at": "2026-09-10T16:49-04:00",
+ "summary": "The S&P 500 fell 0.58% today to 7,591.70 as surging oil prices, now at $103.38 a barrel for US crude, pushed bond yields higher and made investors worry the Fed will raise interest rates. The 10-year Treasury yield, which is what the US government pays to borrow money for a decade, climbed to 4.94%, its highest level in some time, squeezing stock valuations across the board. Gold fell 1.31% and silver dropped 5.66%, both hurt by a stronger dollar and rising rate expectations. Tomorrow's CPI inflation report is the next big test: if consumer prices come in hot, rate hike odds will rise further.",
+ "spx": 7591.7001953125
 }
