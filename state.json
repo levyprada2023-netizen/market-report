@@ -1,8 +1,8 @@
 {
- "date": "2026-09-14",
+ "date": "2026-09-15",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-14T18:22-04:00",
- "summary": "The S&P 500 fell to 7,619.98 today, down 0.48%, as chip stocks were hit hard after several top AI company CEOs publicly called for slowing the pace of AI development. The Nasdaq 100, which is heavy in tech names, dropped 0.80%. The 10 year Treasury yield, which is the interest rate the US government pays to borrow money for a decade, touched 5% before pulling back to 4.96%, a level that makes borrowing more expensive for companies and competes with stocks for investor money. Bitcoin rose 2.44% to 78,715.64, a rare bright spot. Wednesday brings a Federal Reserve interest rate decision that traders currently price at over 92% odds of a hike.",
- "spx": 7619.97998046875
+ "sent_at": "2026-09-15T16:16-04:00",
+ "summary": "The S&P 500 fell 0.45% to 7,585.73 today, pulled down by two forces hitting at once: the 10-year Treasury yield, which is the interest rate the US government pays to borrow money for ten years, touched 5.00%, a level not seen since 2023, and oil jumped 4.43% partly due to outages at a Saudi pipeline. Higher borrowing costs make stocks less attractive compared to bonds, so money rotates out. Tomorrow is the big one: the Federal Reserve is expected to raise interest rates, with traders pricing in a greater than 92% chance of a hike. Bitcoin fell 2.73% after the Senate blocked the Clarity Act, a bill that would have given crypto clearer legal rules.",
+ "spx": 7585.72998046875
 }
