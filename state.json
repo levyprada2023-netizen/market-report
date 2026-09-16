@@ -1,8 +1,8 @@
 {
- "date": "2026-09-15",
+ "date": "2026-09-16",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-15T16:16-04:00",
- "summary": "The S&P 500 fell 0.45% to 7,585.73 today, pulled down by two forces hitting at once: the 10-year Treasury yield, which is the interest rate the US government pays to borrow money for ten years, touched 5.00%, a level not seen since 2023, and oil jumped 4.43% partly due to outages at a Saudi pipeline. Higher borrowing costs make stocks less attractive compared to bonds, so money rotates out. Tomorrow is the big one: the Federal Reserve is expected to raise interest rates, with traders pricing in a greater than 92% chance of a hike. Bitcoin fell 2.73% after the Senate blocked the Clarity Act, a bill that would have given crypto clearer legal rules.",
- "spx": 7585.72998046875
+ "sent_at": "2026-09-16T16:36-04:00",
+ "summary": "The Federal Reserve raised interest rates by 0.25 percentage points today, the first hike since July 2023, and signaled another increase is likely before year end. That spooked stocks: the S&P 500 fell 0.45% to 7,551.81 and the Dow dropped 1.21%, while the 10 year Treasury yield, which is the interest rate the US government pays to borrow for a decade, climbed to 5.01%. Tech held up better than the rest of the market. Retail sales came in at plus 1.2% for August according to press coverage, well above the 0.8% forecast, which is good for the economy but gives the Fed more reason to keep rates higher. COST reports earnings September 24, MU on September 30.",
+ "spx": 7551.81005859375
 }
