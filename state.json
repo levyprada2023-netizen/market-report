@@ -1,8 +1,8 @@
 {
- "date": "2026-09-17",
+ "date": "2026-09-19",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-17T16:13-04:00",
- "summary": "The S&P 500 rose 1.14% today to 7,637.76, led by a strong technology sector gain of 2.26%. The catalyst was the Federal Reserve raising interest rates by 25 basis points yesterday, its first hike in three years, and markets rebounding today as oil fell back and the 10-year Treasury yield dipped to 4.95%. Fear in the market dropped sharply: the VIX, which measures how anxious investors are, fell to 15.41, down nearly 13%. Unemployment claims came in at 196,000 according to press coverage, near a 57-year low, and the Philly Fed manufacturing index beat expectations at 37.8 versus a forecast of 31.3, both pointing to a still-healthy economy.",
- "spx": 7637.759765625
+ "sent_at": "2026-09-19T01:48-04:00",
+ "summary": "The S&P 500 ended nearly flat today at 7,650.50, up just 0.17%, but the story underneath was messy. Tech held up, led by the Nasdaq 100 gaining 0.63%, while almost everything else fell. Bitcoin surged 6% to 81,003 and gold rose to 4,424.90, both benefiting as investors looked for alternatives. The big macro event was the Federal Reserve raising interest rates, with the 10-year Treasury yield hitting 5.00%, meaning borrowing costs are going up across the economy. Next week brings earnings from Costco on September 24 and Micron on September 30, both of which you own.",
+ "spx": 7650.5
 }
