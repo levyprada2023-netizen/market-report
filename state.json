@@ -1,8 +1,8 @@
 {
- "date": "2026-09-19",
+ "date": "2026-09-21",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-19T01:48-04:00",
- "summary": "The S&P 500 ended nearly flat today at 7,650.50, up just 0.17%, but the story underneath was messy. Tech held up, led by the Nasdaq 100 gaining 0.63%, while almost everything else fell. Bitcoin surged 6% to 81,003 and gold rose to 4,424.90, both benefiting as investors looked for alternatives. The big macro event was the Federal Reserve raising interest rates, with the 10-year Treasury yield hitting 5.00%, meaning borrowing costs are going up across the economy. Next week brings earnings from Costco on September 24 and Micron on September 30, both of which you own.",
- "spx": 7650.5
+ "sent_at": "2026-09-21T17:51-04:00",
+ "summary": "The S&P 500 jumped 1.49% today to 7,764.70, within 0.44% of its all time closing high, powered by a massive chip stock rally led by AMD and Intel. Oil dropped 8.31% to 91.97 per barrel, which pulled yields lower and gave investors room to buy growth stocks. Bitcoin surged 6.89% to 86,730.54, an eight month high, adding to the bullish mood. Thursday brings unemployment claims, the next data point worth watching.",
+ "spx": 7764.7001953125
 }
