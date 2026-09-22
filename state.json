@@ -1,8 +1,8 @@
 {
- "date": "2026-09-21",
+ "date": "2026-09-22",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-21T17:51-04:00",
- "summary": "The S&P 500 jumped 1.49% today to 7,764.70, within 0.44% of its all time closing high, powered by a massive chip stock rally led by AMD and Intel. Oil dropped 8.31% to 91.97 per barrel, which pulled yields lower and gave investors room to buy growth stocks. Bitcoin surged 6.89% to 86,730.54, an eight month high, adding to the bullish mood. Thursday brings unemployment claims, the next data point worth watching.",
- "spx": 7764.7001953125
+ "sent_at": "2026-09-22T17:22-04:00",
+ "summary": "The S&P 500 finished essentially flat at 7,764.64, down less than a tenth of a percent, while the Nasdaq 100 rose 0.81% as tech led and financials fell sharply. Oil dropped 6.19% to 89.85 per barrel, press coverage suggests on hopes Iran may reopen the Strait of Hormuz, and that tailwind lifted growth stocks. The VIX, which measures fear priced into the market, fell to 14.21, meaning traders are calmer than yesterday. Unemployment claims are due Thursday and revised consumer sentiment on Friday.",
+ "spx": 7764.64013671875
 }
