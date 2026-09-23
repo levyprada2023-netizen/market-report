@@ -1,8 +1,8 @@
 {
- "date": "2026-09-22",
+ "date": "2026-09-23",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-22T17:22-04:00",
- "summary": "The S&P 500 finished essentially flat at 7,764.64, down less than a tenth of a percent, while the Nasdaq 100 rose 0.81% as tech led and financials fell sharply. Oil dropped 6.19% to 89.85 per barrel, press coverage suggests on hopes Iran may reopen the Strait of Hormuz, and that tailwind lifted growth stocks. The VIX, which measures fear priced into the market, fell to 14.21, meaning traders are calmer than yesterday. Unemployment claims are due Thursday and revised consumer sentiment on Friday.",
- "spx": 7764.64013671875
+ "sent_at": "2026-09-23T16:53-04:00",
+ "summary": "The S&P 500 fell to 7,706 today, down 0.76%, as the 10-year Treasury yield hit 5.11%, its highest level in roughly 19 years. When government borrowing costs rise that fast, investors often sell stocks because safe bonds suddenly look more attractive. Small company stocks got hit hardest, the Russell 2000 fell 1.28%. Gold, oil, bitcoin, and crypto all sold off together, which is unusual and signals broad nervousness rather than a simple rotation. Jobless claims are due Thursday and could move markets if they surprise.",
+ "spx": 7706.02978515625
 }
