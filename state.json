@@ -1,8 +1,8 @@
 {
- "date": "2026-09-25",
+ "date": "2026-09-28",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-25T16:11-04:00",
- "summary": "The S&P 500 closed at 7,743.41, up 0.51% today, driven largely by hopes that the US and Iran are moving toward a deal that could reopen the Strait of Hormuz shipping lane. That sent oil down 2.46% to 92.28 dollars a barrel, which is good for consumers and businesses that depend on fuel costs staying manageable. Gold rose 0.65% to 4,326.00 and silver jumped 2.06%, both acting as stores of value while bond yields remain elevated at 5.18% on the 10 year US Treasury. Next week brings Micron earnings on September 30, which matters directly to your portfolio.",
- "spx": 7743.41015625
+ "sent_at": "2026-09-28T16:32-04:00",
+ "summary": "The S&P 500 fell to 7,683.69 today, down 0.77%, as rising oil prices and surging Treasury yields (the interest rate on 10-year US government bonds hit 5.24%) squeezed stocks broadly. Gold dropped 3.83% and silver fell 4.82%, both hit hard by the rising yields, which make gold less attractive compared to bonds that now pay more. The US-Iran standoff is driving oil higher and bonds lower, a combination that pressures the whole market. Key data this week includes Core PCE (the Fed's preferred inflation gauge) on Wednesday and jobs numbers Friday, both of which could move markets sharply.",
+ "spx": 7683.68994140625
 }
