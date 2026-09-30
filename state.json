@@ -1,8 +1,8 @@
 {
- "date": "2026-09-28",
+ "date": "2026-09-30",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-09-28T16:32-04:00",
- "summary": "The S&P 500 fell to 7,683.69 today, down 0.77%, as rising oil prices and surging Treasury yields (the interest rate on 10-year US government bonds hit 5.24%) squeezed stocks broadly. Gold dropped 3.83% and silver fell 4.82%, both hit hard by the rising yields, which make gold less attractive compared to bonds that now pay more. The US-Iran standoff is driving oil higher and bonds lower, a combination that pressures the whole market. Key data this week includes Core PCE (the Fed's preferred inflation gauge) on Wednesday and jobs numbers Friday, both of which could move markets sharply.",
- "spx": 7683.68994140625
+ "sent_at": "2026-09-30T17:17-04:00",
+ "summary": "The S&P 500 ended September down 0.25% at 7,651.54, capping what Bloomberg called the worst month since June. The market opened higher on softer inflation news, then sold off hard in the final hour as the 10-year Treasury yield rose to 5.29%, spooking investors who worry that high borrowing costs will squeeze corporate profits. Gold held near its highs and bitcoin was essentially flat at 83,709. Friday brings the big one: the monthly jobs report, which will tell the Fed whether the economy is still too hot to cut rates.",
+ "spx": 7651.5400390625
 }
