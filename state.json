@@ -1,8 +1,8 @@
 {
- "date": "2026-10-08",
+ "date": "2026-10-14",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-10-08T16:14-04:00",
- "summary": "The S&P 500 fell to 7,765.36, down 0.47%, while the Nasdaq 100 dropped 1.34% as chip and AI stocks led the decline. The trigger was a report that OpenAI's actual revenue came in well below what investors had expected, which raised fresh doubts about whether the massive spending on AI hardware can be justified. Oil jumped 3.18% on renewed tanker attacks near the Middle East, which pushed energy stocks higher and added to inflation worries. Tomorrow brings the preliminary University of Michigan consumer sentiment reading, which will give a read on how worried ordinary Americans are about prices.",
- "spx": 7765.35986328125
+ "sent_at": "2026-10-14T18:36-04:00",
+ "summary": "The S&P 500 fell 1.11% to 7,718.94 today, led by a sharp drop in tech stocks after press coverage showed inflation came in at 3.7% annually in September, hotter than the 3.6% forecast. Higher inflation means the Federal Reserve is more likely to raise interest rates, which hurts growth stocks the most because their value depends on future profits that become worth less when rates rise. The VIX, which measures fear priced into the market, jumped 10.48% to 16.87. Gold fell 1.16%, silver dropped 5.64%, and Korea's stock market fell 5.46%. Tomorrow brings producer price data, retail sales numbers, and a speech from Fed Chair Warsh, any of which could move markets further.",
+ "spx": 7718.93994140625
 }
