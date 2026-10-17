@@ -1,8 +1,8 @@
 {
- "date": "2026-10-14",
+ "date": "2026-10-16",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-10-14T18:36-04:00",
- "summary": "The S&P 500 fell 1.11% to 7,718.94 today, led by a sharp drop in tech stocks after press coverage showed inflation came in at 3.7% annually in September, hotter than the 3.6% forecast. Higher inflation means the Federal Reserve is more likely to raise interest rates, which hurts growth stocks the most because their value depends on future profits that become worth less when rates rise. The VIX, which measures fear priced into the market, jumped 10.48% to 16.87. Gold fell 1.16%, silver dropped 5.64%, and Korea's stock market fell 5.46%. Tomorrow brings producer price data, retail sales numbers, and a speech from Fed Chair Warsh, any of which could move markets further.",
- "spx": 7718.93994140625
+ "sent_at": "2026-10-16T23:21-04:00",
+ "summary": "The S&P 500 fell 1.09% today to 7,659.44, dragged down by a sharp selloff in technology stocks. The Nasdaq 100 dropped 2.50%, its worst single day in weeks, as rising oil prices, a hot wholesale inflation reading, and growing doubts about AI company debt loads all hit at once. Fear in the market, measured by the VIX which tracks how nervous investors are, jumped 21.45% to 19.99. Earnings season starts in earnest next week with NFLX, META, TSLA, IBM and GOOG all reporting.",
+ "spx": 7659.43994140625
 }
