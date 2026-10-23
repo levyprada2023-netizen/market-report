@@ -1,8 +1,8 @@
 {
- "date": "2026-10-16",
+ "date": "2026-10-22",
  "slot": "Your question, plus the daily report",
  "sent": true,
- "sent_at": "2026-10-16T23:21-04:00",
- "summary": "The S&P 500 fell 1.09% today to 7,659.44, dragged down by a sharp selloff in technology stocks. The Nasdaq 100 dropped 2.50%, its worst single day in weeks, as rising oil prices, a hot wholesale inflation reading, and growing doubts about AI company debt loads all hit at once. Fear in the market, measured by the VIX which tracks how nervous investors are, jumped 21.45% to 19.99. Earnings season starts in earnest next week with NFLX, META, TSLA, IBM and GOOG all reporting.",
- "spx": 7659.43994140625
+ "sent_at": "2026-10-22T21:47-04:00",
+ "summary": "The S&P 500 fell 1.21% to 7,663.43 today, but the real pain was in tech. The Nasdaq 100 dropped 2.86% as investors worried that big AI companies are spending enormous sums on data centers without a clear payoff timeline. META fell nearly 7% after its earnings showed free cash flow turned negative, meaning it spent more than it brought in. Gold fell 2.84% and bitcoin dropped 3.26%, so there was no safe haven in alternative assets. Tomorrow brings Flash PMI readings, which measure how much business activity expanded or contracted this month.",
+ "spx": 7663.43017578125
 }
